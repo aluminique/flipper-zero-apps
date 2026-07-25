@@ -1,0 +1,15 @@
+App(
+    appid="flipper_share_uart",
+    name="Flipper Share UART",
+    apptype=FlipperAppType.EXTERNAL,
+    entry_point="share_app",
+    # tools/ holds the host-only framing test harness; keep it out of the FAP.
+    sources=["*.c*", "!tools"],
+    stack_size=2 * 1024,
+    fap_category="GPIO",
+    fap_version="0.1",
+    fap_icon="uart_share.png",
+    fap_description="Direct file transfer between flippers via UART (pins 13/14)",
+    fap_author="@lomalkin",
+    fap_weburl="https://github.com/lomalkin/flipper-zero-apps/blob/-/flipper_share_uart",
+)
