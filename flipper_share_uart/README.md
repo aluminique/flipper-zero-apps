@@ -1,29 +1,35 @@
-# Flipper Share UART — implementation specification
+# Flipper Share UART — direct file transfer between Flippers over a 3-wire link
 
-Status: **specification, not implemented**. This document is a complete, self-contained
-work order for implementing `flipper_share_uart` — direct file transfer between two
-Flipper Zeros over a 3-wire UART link, using the Flipper Share v2 protocol. All design
-decisions below are final; implement as written unless something is physically impossible,
-and record any forced deviation in this README.
+> **⚠️ WARNING:** Flipper Share UART is an **experimental-only** app, it is not recommended for regular use.
+> Consider using other Flipper Share transports (NFC, Sub-GHz, IR) for everyday file transfer.
 
-The app must build with `ufbt` against the official firmware SDK and run on unmodified
-official firmware. Every firmware API named below is exported to FAPs (verified against
-`targets/f7/api_symbols.csv`, API 87.x); re-verify against the current SDK before coding.
+## Overview
 
-## 1. Goal and scope
+**Flipper Share UART** transfers any file directly from one Flipper Zero to another over a
+**3-wire UART link** on the GPIO header (USART1, pins 13/14, 230400 baud, full duplex) —
+no phone, computer, internet or radio needed, just three jumper wires.
 
-- Transfer a file from one Flipper Zero to another over USART1 (GPIO header pins 13/14)
-  at 230400 baud, full duplex.
-- Reuse the Flipper Share v2 protocol engine from `../flipper_share_nfc/` unchanged in
-  behavior: ANNOUNCE / REQUEST / DATA packets, CRC16, receiver-side block bitmap with
-  resume, final MD5 verification.
-- Expected effective throughput ~20 KB/s (line-rate bound); an 8 KB file transfers in
-  well under a second, a 1 MB file in under a minute.
+It is a rewrite of Flipper Share with the transport replaced by a COBS-framed serial link.
+The basics of the classic flipper_share file-transfer protocol (resumable,
+integrity-checked) are preserved.
 
-Out of scope (v2 candidates, do not implement): DMA RX, baud negotiation, LPUART1
-support, single-wire half-duplex mode, flow control.
+Expected transfer speed is around **20 KB/s** — line-rate bound, by far the fastest
+Flipper Share transport, but the only one that needs wires. This is an estimate from the
+baud rate, not a bench measurement (see *Status* below).
 
-## 2. Wiring (user-facing)
+Other Flipper Share transports (Sub-GHz, IR, NFC & more): [github.com/lomalkin/flipper-zero-apps](https://github.com/lomalkin/flipper-zero-apps)
+
+Features:
+
+- No extra hardware beyond three jumper wires — no adapter, no level shifter. Builds with
+  `ufbt` against the official firmware; no firmware modification.
+- Integrity check with an MD5 hash after reception; per-packet CRC16.
+- Automatic retransmission of lost/corrupted packets. Pull a wire mid-transfer and
+  reconnect — the receiver's block bitmap picks up where it left off.
+- Full duplex and symmetric: no turnaround, no collisions, no jitter logic.
+- Torrent-like progress bar on the receiver; filename/size and ETA on the sender.
+
+# Wiring
 
 | Flipper A | Flipper B |
 |---|---|
@@ -31,268 +37,133 @@ support, single-wire half-duplex mode, flow control.
 | pin 14 (RX) | pin 13 (TX) |
 | pin 8/11/18 (GND) | pin 8/11/18 (GND) |
 
-Three jumper wires, TX/RX crossed. Document this table in the app's catalog description
-and keep it in this README.
+Three jumper wires, **TX/RX crossed**, grounds common. The app's UI abbreviates this as
+`13-14 X, GND-GND`.
 
-## 3. Architecture and naming (shared convention for all new transports)
+# Usage
 
-New Flipper Share apps (`flipper_share_uart`, `flipper_share_ibutton`,
-`flipper_share_rfid`) do NOT continue the per-app prefix pattern of the three legacy apps
-(`fs_`/`ish_`/`nsh_`). Instead they share one neutral prefix, so the engine files stay
-**byte-identical** across the new apps and fixes port by file copy. The three legacy apps
-must not be modified.
+1. Wire the two Flippers as above.
+2. On the receiving Flipper: open Flipper Share UART → **Receive via UART**.
+3. On the sending Flipper: open Flipper Share UART → **Send via UART** → pick a file →
+   **OK**. The receiver shows a progress bar and verifies the MD5 hash at the end; the
+   file is saved to `/ext/inbox/`.
 
-Rules:
+The sender shows the file name, size and a rough ETA. The receiver shows
+"13-14 X, GND-GND / Waiting for announce..." until it locks, then the progress bar with
+percentage and ETA.
 
-1. Engine files `share.c`, `share.h`, `md5_hash.c`, `md5_hash.h` are derived from
-   `../flipper_share_nfc/nfc_share.c`, `nfc_share.h`, `md5_hash.c`, `md5_hash.h` by a
-   mechanical rename: `nsh_` → `fsh_`, `NSH_` → `FSH_`, `NfcShare` → `Share`,
-   `nfc_share` → `share`. Engine log TAG becomes `"FShare"`.
-2. All transport-tunable constants are MOVED out of the engine into a new per-app header
-   `share_config.h` (see section 6). `share.h` does `#include "share_config.h"` at the
-   top and defines none of those constants itself.
-3. **If `flipper_share_ibutton/` or `flipper_share_rfid/` already exists in this repo,
-   copy `share.c`, `share.h`, `md5_hash.c`, `md5_hash.h` from it verbatim instead of
-   redoing the rename.** After this task, the engine files must be byte-identical across
-   all new apps that exist. (Exception: `#ifdef FSH_CAROUSEL` guarded blocks added by the
-   RFID app are part of the canonical engine; keep them — they compile out here.)
-4. App shell files are renamed the same way and are also transport-neutral:
-   `share_app.c/.h` (entry point symbol `share_app`), `scenes/share_scene_*.c/.h`.
-   UI strings that named the transport ("Send via NFC" etc.) must use the
-   `FSH_TRANSPORT_NAME` macro from `share_config.h` instead of a literal.
-5. Per-app files (the only ones that differ between new apps): `application.fam`, the
-   icon, `share_config.h`, and the transport layer (here: `uart_transport.*`,
-   `uart_framing.*`).
+The app takes over USART1 while a transfer scene is open: it disables the expansion
+service and acquires the port, releasing both on exit. If something else already holds the
+port, the scene shows **"UART port busy"** and does nothing — back out with the Back
+button. (The CLI is unaffected; it runs over USB CDC.)
 
-The engine ↔ transport contract (same as the NFC app, keep it):
+---
 
-- Engine calls `cb_send_bytes(buf, len)` → wired to `uart_transport_send()`.
-- Transport delivers each complete received packet via
-  `void fsh_receive_callback(const uint8_t* buf, size_t size)` (declared in `share.h`),
-  from a thread context (never from ISR).
-- Scene `on_enter`/`on_exit` call `uart_transport_init()` / `uart_transport_deinit()`.
+# Flipper Share UART protocol
 
-## 4. Files to produce
+Two layers: a **COBS-framed serial transport** (physical/link layer) under the existing
+**file-transfer protocol** (selective-repeat ARQ). The file-transfer protocol is identical
+to the other Flipper Share builds; only the transport differs.
 
-```
-flipper_share_uart/
-├── application.fam
-├── uart_share.png            # 10x10 1-bit icon; copy ../flipper_share_nfc/nfc_share.png as placeholder
-├── README.md                 # this file, updated with measured numbers after bench
-├── share.h / share.c         # engine (rename of nfc_share.*, constants moved to config)
-├── share_config.h            # all tunables, section 6
-├── md5_hash.h / md5_hash.c   # verbatim copy
-├── share_app.h / share_app.c
-├── scenes/share_scene_*.c/.h # menu, file_browser, show_file, send, receive
-├── uart_transport.h / uart_transport.c
-├── uart_framing.h / uart_framing.c    # pure COBS codec, no furi includes (host-testable)
-├── tools/framing_test.c      # host test harness, see section 9
-└── .github/workflows/build.yml        # copy from ../flipper_share_ir/
-```
+## Physical / link layer — the UART transport
 
-`application.fam`:
+- **Port:** USART1 at `UART_TP_BAUD` (230400 baud, 8N1), full duplex, acquired through
+  `furi_hal_serial_control_acquire`. The expansion service is disabled first — mandatory
+  before taking the port, and required by the expansion header's own contract — and
+  re-enabled on teardown.
+- **Framing:** COBS (Consistent Overhead Byte Stuffing) with `0x00` as the frame
+  delimiter. On the wire: `COBS_encode(packet) + 0x00`; encoded data never contains a zero
+  byte, so the delimiter is unambiguous. Worst-case overhead is `len/254 + 1` bytes.
+- **Desync recovery is inherent:** after any corruption the decoder drops bytes until the
+  next `0x00` and resynchronizes. A damaged frame either fails COBS decode or fails the
+  engine's length/CRC16 check — both are silent drops, and the ARQ re-requests. No
+  transport CRC is added on top of the packet CRC16 and the whole-file MD5.
+- **RX path:** the serial RX interrupt only drains bytes into a `FuriStreamBuffer` —
+  nothing else runs in ISR context. A `UartRxWorker` thread accumulates bytes up to the
+  delimiter, COBS-decodes, and calls `fsh_receive_callback` in thread context, which is
+  what the engine expects. Frames longer than `UART_TP_FRAME_MAX` without a delimiter are
+  discarded up to the next one.
+- **TX path:** COBS-encode, append the delimiter, then transmit under a mutex with
+  `furi_hal_serial_tx` + `tx_wait_complete`. The blocking write is deliberate: at 230400
+  baud a 521-byte DATA packet occupies ~23 ms, and that backpressure paces the engine's
+  send loop, so no outbound mailbox is needed (unlike the NFC and iButton transports).
+- **Symmetry:** both sides run RX permanently. There is no turnaround and no contention,
+  so `FSH_REQUEST_JITTER_MS` is 0 and the half-duplex timeouts are small.
 
-```python
-App(
-    appid="flipper_share_uart",
-    name="Flipper Share UART",
-    apptype=FlipperAppType.EXTERNAL,
-    entry_point="share_app",
-    stack_size=2 * 1024,
-    fap_category="GPIO",
-    fap_version="0.1",
-    fap_icon="uart_share.png",
-    fap_description="Direct file transfer between flippers via UART (pins 13/14)",
-    fap_author="@lomalkin",
-    fap_weburl="https://github.com/lomalkin/flipper-zero-apps/blob/-/flipper_share_uart",
-)
-```
+## Packet structure
 
-## 5. Transport design
+Every packet: `[version(1)][tx_id(1)][packet_type(1)][payload][crc16(2)]`. The payload
+length depends on the type. `FSH_DATA_LENGTH` is 512 here — a 521-byte DATA packet, ~23 ms
+of line time.
 
-### 5.1 Port lifecycle
+### `0x01` — Announce (control payload)
 
-Firmware APIs (all exported): `furi_hal_serial_control_acquire/release/is_busy`
-(`targets/f7/furi_hal/furi_hal_serial_control.h`), `furi_hal_serial_init/tx/
-tx_wait_complete/async_rx_start/async_rx_stop/async_rx_available/async_rx`
-(`targets/f7/furi_hal/furi_hal_serial.h`), `expansion_disable/expansion_enable`
-(`applications/services/expansion/expansion.h`).
+| Field       | Size     | Type                  |
+|-------------|----------|-----------------------|
+| `file_name` | 36 bytes | char[36], zero-padded |
+| `file_size` | 4 bytes  | uint32_t              |
+| `file_hash` | 16 bytes | MD5                   |
 
-`bool uart_transport_init(void)` — called from the send/receive scene `on_enter`:
+### `0x02` — Request range (control payload)
 
-1. `Expansion* expansion = furi_record_open(RECORD_EXPANSION); expansion_disable(expansion);`
-   — MANDATORY before acquiring the port, and required by the expansion header's own
-   contract. Keep the record open for the app's lifetime. Reference pattern:
-   firmware `applications/main/gpio/gpio_app.c`.
-2. If `furi_hal_serial_control_is_busy(FuriHalSerialIdUsart)` → cleanup, return false.
-3. `handle = furi_hal_serial_control_acquire(FuriHalSerialIdUsart)`; if NULL → cleanup,
-   return false. (Acquiring also detaches any log output from this port automatically.)
-4. `furi_hal_serial_init(handle, UART_TP_BAUD)`.
-5. Allocate RX `FuriStreamBuffer` (size `UART_TP_RX_STREAM_SIZE`, trigger 1), start the
-   deframer thread `UartRxWorker` (stack 2048), then
-   `furi_hal_serial_async_rx_start(handle, rx_isr_cb, ctx, false)`.
+| Field     | Size    | Type     |
+|-----------|---------|----------|
+| `start`   | 4 bytes | uint32_t |
+| `end`     | 4 bytes | uint32_t |
+| padding   | rest    | zero     |
 
-On `false`, the scene must show "UART port busy" in its status line and not start the
-protocol worker; the user backs out with the Back button.
+### `0x03` — Data (data payload)
 
-`void uart_transport_deinit(void)` — reverse order: `furi_hal_serial_async_rx_stop`,
-stop+join the worker thread, `furi_hal_serial_deinit`, `furi_hal_serial_control_release`,
-`expansion_enable(expansion)`, `furi_record_close(RECORD_EXPANSION)`, free buffers.
-The caller must have already stopped every thread that can call `uart_transport_send()`
-(same rule as the NFC transport).
+| Field        | Size            | Type     |
+|--------------|-----------------|----------|
+| `block_num`  | 4 bytes         | uint32_t |
+| `block_data` | FSH_DATA_LENGTH | raw data |
 
-### 5.2 Framing: COBS over the byte stream
+## Session
 
-UART gives a byte stream; packets need delimiting. Use COBS (Consistent Overhead Byte
-Stuffing) with `0x00` as the frame delimiter:
+- **Sender** announces the file (name, size, MD5) until a receiver locks on, then streams
+  the requested DATA blocks.
+- **Receiver** locks to the first valid announce (`tx_id`), preallocates the file, and
+  re-requests the missing block range on timeout. It writes each block once (duplicates
+  ignored) and, when all blocks are in, computes the MD5 and compares it to the announced
+  hash.
+- Lost or corrupted packets are simply re-requested, so the transfer converges.
 
-- On the wire: `COBS_encode(packet) + 0x00`. Encoded data never contains `0x00`.
-- Encoder/decoder live in `uart_framing.c/.h` as pure C (no furi headers): 
-  `size_t uart_cobs_encode(const uint8_t* in, size_t len, uint8_t* out);`
-  `size_t uart_cobs_decode(const uint8_t* in, size_t len, uint8_t* out);` (returns 0 on
-  malformed input). Worst-case encoded size = `len + len/254 + 1`; add
-  `_Static_assert(UART_TP_FRAME_MAX >= FSH_PACKET_MAX + FSH_PACKET_MAX / 254 + 2, ...)`
-  in `uart_transport.c`.
-- Desync recovery is inherent: after any corruption, the decoder drops bytes until the
-  next `0x00` and resynchronizes. A corrupted frame either fails COBS decode or fails the
-  engine's length/CRC16 validation — both are silent drops; the protocol ARQ re-requests.
+## Files
 
-### 5.3 RX path
+- `share.c` / `share.h` — shared file-transfer engine (byte-identical across the new
+  Flipper Share apps).
+- `uart_framing.c/.h` — pure-C COBS codec, no furi includes, host-testable.
+- `uart_transport.c/.h` — HAL glue: port lifecycle, the RX ISR and deframer worker, the
+  blocking TX path.
+- `share_config.h` — all tunables (baud, frame size, buffer sizes, timeouts, throughput
+  estimate).
+- `md5_hash.c/.h` — MD5 for the integrity check.
+- `share_app.c/.h`, `scenes/share_scene_*.c` — app shell and the five UI scenes.
+- `tools/framing_test.c` — host test harness for the COBS codec
+  (`cc tools/framing_test.c uart_framing.c`). Kept out of the FAP via
+  `sources=["*.c*", "!tools"]`.
 
-`rx_isr_cb` (ISR context, per the HAL header warning): while
-`furi_hal_serial_async_rx_available(handle)` → read one byte with
-`furi_hal_serial_async_rx(handle)` → `furi_stream_buffer_send(..., 0)`. No other work in
-the ISR. (Same pattern as firmware `applications/debug/uart_echo/uart_echo.c`.)
+## Status
 
-`UartRxWorker` thread: blocking-read bytes from the stream buffer, accumulate into a
-frame buffer until `0x00`, COBS-decode, and call `fsh_receive_callback(packet, len)`.
-Oversized frames (> `UART_TP_FRAME_MAX` without a delimiter) are discarded up to the next
-delimiter. Thread exits on a `FSH_WORKER_STOP_FLAG` thread flag; use
-`furi_stream_buffer_receive` with a timeout of `UART_TP_RX_POLL_MS` so the flag is polled.
+- Builds warning-clean with `ufbt` (SDK release 1.4.3 / API 87.1) and passes `APPCHK`, so
+  all imports resolve on unmodified official firmware.
+- The COBS codec is validated on the host: `tools/framing_test.c` passes 20007/20007
+  checks — fixed vectors (empty, 1-byte, 61-byte control, 521-byte DATA, all-`0x00`,
+  all-`0xFF`), 10000 random round-trips through COBS plus a byte-stream deframer, 10000
+  corrupted frames with zero silent leaks, and delimiter resync after a truncated frame.
+- **Not yet bench-tested on two devices.** `FSH_PAYLOAD_THROUGHPUT_BPS` is the `20000`
+  estimate from the line rate, not a measured value; the ETA shown in the UI is only as
+  good as that constant. Replace it (and the numbers in this README) once a real transfer
+  has been timed.
 
-### 5.4 TX path
-
-`void uart_transport_send(const uint8_t* buf, size_t len)`:
-COBS-encode into a static TX buffer, append `0x00`, then under a `FuriMutex`:
-`furi_hal_serial_tx(handle, frame, frame_len); furi_hal_serial_tx_wait_complete(handle);`.
-Blocking TX is intentional — at 230400 baud a 521-byte DATA packet occupies ~23 ms and
-this back-pressure naturally paces the engine's send loop; no mailbox is needed (unlike
-NFC). If the transport is not running, drop the packet silently (ARQ recovers).
-
-### 5.5 Duplex notes
-
-The link is full duplex and symmetric; both sides run RX permanently. There is no
-turnaround, no collision, and no jitter logic — the half-duplex constants in
-`share_config.h` are set accordingly (zero jitter, small timeouts).
-
-## 6. `share_config.h` — all constants
-
-| Constant | Value | Rationale |
-|---|---|---|
-| `FSH_TRANSPORT_NAME` | `"UART"` | UI strings ("Send via " FSH_TRANSPORT_NAME ...) |
-| `FSH_DATA_LENGTH` | `512` | file bytes per DATA packet → 521-byte packet, ~23 ms of line time |
-| `FSH_ANNOUNCE_INTERVAL_MS` | `1000` | fast lock; line is cheap |
-| `FSH_ANNOUNCE_CONNECTED_MS` | `3000` | keep as NFC |
-| `FSH_RX_TIMEOUT_MS` | `200` | REQUEST retry; RTT is milliseconds |
-| `FSH_TX_TIMEOUT_MS` | `5` | full duplex, no turnaround needed |
-| `FSH_IDLE_TICK_MS` | `5` | engine tick; TX pacing comes from blocking send |
-| `FSH_CONNECTED_IDLE_MS` | `5000` | keep as NFC |
-| `FSH_REQUEST_JITTER_MS` | `0` | no collisions on full duplex |
-| `FSH_PAYLOAD_THROUGHPUT_BPS` | `20000` | ETA estimate; REPLACE with measured value after bench |
-| `FSH_STALL_MS` | `3000` | stall indicator |
-| `UART_TP_BAUD` | `230400` | proven in firmware `uart_echo`; raise only after bench |
-| `UART_TP_FRAME_MAX` | `528` | encoded 521-byte packet + COBS overhead + delimiter |
-| `UART_TP_RX_STREAM_SIZE` | `2048` | ~4 max frames of headroom |
-| `UART_TP_RX_POLL_MS` | `25` | worker stop-flag poll period |
-
-Engine constants that do not depend on the transport (`FSH_HASH_CHUNK_SIZE`,
-`FSH_PARTS_COUNT`, `FSH_ETA_*`, packet structure sizes) stay in `share.h`.
-
-## 7. Scenes / UI
-
-Five scenes as in the NFC app, renamed per section 3. Changes beyond the rename:
-
-- All "via NFC" strings → `FSH_TRANSPORT_NAME`.
-- Send/receive scenes: on `uart_transport_init() == false`, show "UART port busy" and do
-  not start the worker (section 5.1). No `stop_field()` equivalent exists here; drop
-  those calls.
-- Add one static hint line to the send and receive scenes' idle state: `"13-14 X, GND-GND"`
-  (wiring reminder).
-
-## 8. Edge cases
-
-- **Wire disconnected mid-transfer**: receiver keeps re-REQUESTing on `FSH_RX_TIMEOUT_MS`,
-  sender keeps announcing at `FSH_ANNOUNCE_CONNECTED_MS`; on reconnect the block bitmap
-  resumes. No transport code needed — verify in bench.
-- **Noise / garbage on the line**: COBS resync + engine CRC16 + final MD5. No transport
-  CRC is added (packet CRC16 is sufficient).
-- **Port busy** (CLI on another channel is fine — CLI uses USB CDC; but another app or
-  expansion module may hold USART): handled via `is_busy`/NULL-acquire → UI message.
-- **TX during deinit**: forbidden by contract (caller stops protocol worker first);
-  `uart_transport_send` also checks a `running` flag under the TX mutex.
-- **Both sides same role**: two senders announce into each other — engine ignores
-  unexpected packet types by design; nothing to do.
-
-## 9. Testing
-
-Host tests (no hardware):
-- `tools/framing_test.c`: compile with `cc tools/framing_test.c uart_framing.c` (pattern:
-  `../flipper_share_ir/tools/modem_test.c`). Round-trip: empty, 1-byte, 61-byte CTRL,
-  521-byte DATA, all-0x00 payload, all-0xFF payload, random payloads ×10000; corrupt
-  random bytes and verify decode failure or engine-level rejection; verify resync after a
-  truncated frame. Zero failures required.
-
-Bench (two Flippers, official firmware, app installed via `ufbt launch` / qFlipper):
-1. Transfer an 8 KB file → completes, MD5 verdict OK on receiver.
-2. Transfer a 1 MB file → completes; record wall-clock time; write the measured B/s into
-   `FSH_PAYLOAD_THROUGHPUT_BPS` and into this README.
-3. Pull the TX wire for ~5 s mid-transfer of the 1 MB file, reconnect → transfer resumes
-   and completes with MD5 OK.
-4. Start receiver before sender, and sender before receiver → both orders lock and
-   complete.
-5. Cancel on both sides mid-transfer → clean exit, no crash, expansion service restored
-   (verify expansion settings menu still works after app exit).
-
-Acceptance = all five bench points pass + host tests pass + `ufbt` build is warning-clean
-(`-Werror` is on by default).
-
-## 10. Non-goals / v2 ideas
+## Non-goals / v2 ideas
 
 DMA RX (`furi_hal_serial_dma_rx_start`) for lower ISR load; baud negotiation inside
-ANNOUNCE (protocol-compatible extension); LPUART1 as a second port option; single-wire
-half-duplex USART mode (2-wire link) via LL registers.
+ANNOUNCE (a protocol-compatible extension); LPUART1 as a second port option; single-wire
+half-duplex USART mode for a 2-wire link.
 
-## 11. Implementation notes / forced deviations
+# Credits
 
-Implemented as written except for the points below.
-
-- **Engine copied verbatim from the RFID app (rule 3).** `share.c` / `share.h` /
-  `md5_hash.*` are byte-identical to `flipper_share_rfid`'s engine, including the
-  `#ifdef FSH_CAROUSEL` blocks — those compile out here because this app's
-  `share_config.h` does not define `FSH_CAROUSEL`, so UART runs the classic
-  ANNOUNCE/REQUEST/DATA flow unchanged. (`flipper_share_ibutton` shipped before the
-  carousel blocks existed; its engine should get the same verbatim backport to complete
-  the three-way byte-identity — not done here to leave that app's branch untouched.)
-- **Engine TX symbol is the neutral `fsh_transport_send`** (mirror of `fsh_receive_callback`),
-  not `uart_transport_send`, so the engine stays byte-identical across transports.
-- **Modulo-by-zero guard carried in from the canonical engine.** `FSH_REQUEST_JITTER_MS`
-  is 0 for this full-duplex link; the engine's re-request backoff reads the jitter into a
-  local and guards `if(jitter)` before the modulo, so it builds clean under `-Werror` and
-  never faults. (Introduced with the RFID app; part of the canonical engine.)
-- **COBS codec validated on the host.** `tools/framing_test.c` (`cc tools/framing_test.c
-  uart_framing.c`, `-Wall -Wextra -Werror`) passes 0/20007 checks: fixed vectors (empty,
-  1-byte, 61-byte CTRL, 521-byte DATA, all-0x00, all-0xFF), 10000 random round-trips
-  through COBS + a byte-stream deframer, 10000 corrupted frames (0 silent leaks — every
-  corruption is a decode failure or a mismatch the engine CRC16 drops), and delimiter
-  resync after a truncated frame.
-- **API re-verified at SDK release 1.4.3 (API 87.1).** All `furi_hal_serial*`,
-  `furi_hal_serial_control_*` and `expansion_*` symbols named in section 5 are exported.
-  The RX interrupt only drains bytes into a stream buffer; the `UartRxWorker` thread
-  deframes and decodes (delivering to `fsh_receive_callback` in thread context).
-
-**Build status:** builds warning-clean with `ufbt` (SDK release 1.4.3 / API 87.1);
-`APPCHK` passes on unmodified official firmware. `tools/` is kept out of the FAP via
-`sources=["*.c*", "!tools"]` in `application.fam`.
-
-**Bench:** not yet run (needs two devices + 3 jumper wires). `FSH_PAYLOAD_THROUGHPUT_BPS`
-stays at the `20000` estimate until section 9 is executed.
+Derived from Flipper Share. The UART transport is built on the Flipper firmware
+`furi_hal_serial` API, all through the official external app API.

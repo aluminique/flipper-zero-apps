@@ -44,3 +44,11 @@ An experimental flavor on the LF RFID coil: the receiver drives the field, the s
 
 - **~315 B/s**
 - Works in near-contact: hold the coils ~2 cm apart (not pressed together) and keep them still
+
+
+### 🔌 [Flipper Share UART](flipper_share_uart) — over a 3-wire link
+
+An experimental flavor on the GPIO header: USART1 at 230400 baud, full duplex, COBS-framed. The only transport that needs wires — and the fastest because of it.
+
+- **~20 KB/s** expected (line-rate bound; estimate, not yet bench-measured)
+- Needs three jumper wires: pin 13 ↔ pin 14 crossed, GND ↔ GND
