@@ -385,7 +385,16 @@ static void update_timer_callback(void* context) {
             *model = (uint8_t)state->counter;
         }, true);
     } else {
-        snprintf(progress_text, sizeof(progress_text), "Touch iButton pads\nWaiting for announce...");
+        // Diagnostic: p = reset transactions that saw a slave presence pulse,
+        // k = packets read. p==0 -> no 1-Wire link; p>0,k==0 -> link but no data.
+        uint32_t dp = 0, dk = 0;
+        ibutton_transport_host_stats(&dp, &dk);
+        snprintf(
+            progress_text,
+            sizeof(progress_text),
+            "Waiting for announce\np:%lu k:%lu",
+            (unsigned long)dp,
+            (unsigned long)dk);
 
         // If we're no longer locked but the progress view is active, switch back to dialog
         if(progress_view_active) {

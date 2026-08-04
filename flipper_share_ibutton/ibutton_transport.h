@@ -37,3 +37,8 @@ void ibutton_transport_deinit(void);
 // thread). Thread-safe: only sets a flag observed by the host worker. No-op for
 // the slave role (the emulation simply stops answering after deinit).
 void ibutton_transport_stop_field(void);
+
+// Host-side diagnostics (temporary): count of reset transactions that detected a
+// slave presence pulse, and packets read with a valid length. Zeroed if not
+// running as host. Used by the receive screen to localize a stuck link.
+void ibutton_transport_host_stats(uint32_t* present, uint32_t* pkts);
