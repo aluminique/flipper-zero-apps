@@ -3,9 +3,11 @@
 
 #include <furi.h>
 #include <furi_hal.h>
+#include <furi_hal_rfid.h>
 
 #include <one_wire/one_wire_host.h>
 #include <one_wire/one_wire_slave.h>
+#include <power/power_service/power.h>
 
 #define TAG "IbtnTransport"
 
@@ -288,8 +290,22 @@ void ibutton_transport_init(IbtnTransportMode mode) {
         tp->rx_worker = furi_thread_alloc_ex("IbtnRxWorker", 2048, ibtn_tp_rx_worker_thread, tp);
         furi_thread_start(tp->rx_worker);
 
+        // The iButton pad shares its analog path with the LF RFID front-end; the
+        // stock key emulator grounds the RFID pull before emulating so the RFID
+        // circuitry cannot load the 1-Wire line. Same here.
+        furi_hal_rfid_pins_reset();
+        furi_hal_rfid_pin_pull_pulldown();
+
         onewire_slave_start(tp->slave);
     } else {
+        // The iButton line's pull-up is fed from the 5V rail, which is only
+        // powered from USB or the OTG boost. Without it the bus floats and the
+        // host sees phantom presence pulses (and reads only zeros). The stock
+        // iButton reader enables OTG for exactly this reason — do the same.
+        Power* power = furi_record_open(RECORD_POWER);
+        power_enable_otg(power, true);
+        furi_record_close(RECORD_POWER);
+
         tp->host = onewire_host_alloc(IBTN_TP_GPIO);
         onewire_host_start(tp->host);
 
@@ -325,6 +341,8 @@ void ibutton_transport_deinit(void) {
             furi_thread_free(tp->rx_worker);
         }
         if(tp->rx_queue) furi_message_queue_free(tp->rx_queue);
+        // Release the RFID pull grounded at init (mirrors the stock emulator).
+        furi_hal_rfid_pins_reset();
     } else {
         if(tp->host_worker) {
             furi_thread_join(tp->host_worker);
@@ -334,6 +352,10 @@ void ibutton_transport_deinit(void) {
             onewire_host_stop(tp->host);
             onewire_host_free(tp->host);
         }
+        // Drop the OTG 5V enabled at init (powers the pad pull-up, stock-reader style).
+        Power* power = furi_record_open(RECORD_POWER);
+        power_enable_otg(power, false);
+        furi_record_close(RECORD_POWER);
     }
 
     if(tp->tx_queue) furi_message_queue_free(tp->tx_queue);
