@@ -169,9 +169,46 @@ static int32_t ibtn_tp_rx_worker_thread(void* context) {
 
 // ===== Host (receiver) side ==================================================
 // Owns the OneWireHost exclusively. Each iteration is one reset+presence
-// transaction: PUSH a pending REQUEST, else POLL the slave for a packet. A
-// glitched byte (contact bounce / preemption) just fails the engine's CRC16 and
-// is re-requested, so no per-byte integrity is needed here.
+// transaction: PUSH a pending REQUEST, else POLL the slave for a packet.
+//
+// TIMING: the firmware's 1-Wire host bit-bangs with plain busy-wait delays and
+// NO critical section, so a FreeRTOS preemption or a long interrupt lands in the
+// middle of a bit slot and corrupts it. Under USB load (CDC/RPC/qFlipper) that
+// happened on virtually every transaction — the host missed the presence pulse
+// window entirely and the link looked dead. The slave side has no such problem
+// (the firmware runs its whole transaction inside the EXTI critical section).
+// So the host wraps the reset and each byte in a SHORT critical section
+// (~0.6-1.2 ms of interrupts-off), leaving gaps between bytes for the system to
+// breathe; the slave tolerates inter-byte gaps up to its 15 ms slot timeout.
+
+static bool ibtn_tp_host_reset_atomic(OneWireHost* host) {
+    FURI_CRITICAL_ENTER();
+    bool present = onewire_host_reset(host);
+    FURI_CRITICAL_EXIT();
+    return present;
+}
+
+static void ibtn_tp_host_write_atomic(OneWireHost* host, uint8_t byte) {
+    FURI_CRITICAL_ENTER();
+    onewire_host_write(host, byte);
+    FURI_CRITICAL_EXIT();
+}
+
+static uint8_t ibtn_tp_host_read_atomic(OneWireHost* host) {
+    FURI_CRITICAL_ENTER();
+    uint8_t value = onewire_host_read(host);
+    FURI_CRITICAL_EXIT();
+    return value;
+}
+
+static void ibtn_tp_host_write_bytes_atomic(OneWireHost* host, const uint8_t* buf, size_t len) {
+    for(size_t i = 0; i < len; i++) ibtn_tp_host_write_atomic(host, buf[i]);
+}
+
+static void ibtn_tp_host_read_bytes_atomic(OneWireHost* host, uint8_t* buf, size_t len) {
+    for(size_t i = 0; i < len; i++) buf[i] = ibtn_tp_host_read_atomic(host);
+}
+
 static int32_t ibtn_tp_host_worker_thread(void* context) {
     IbtnTransport* tp = context;
     uint8_t buf[FSH_PACKET_MAX];
@@ -188,7 +225,7 @@ static int32_t ibtn_tp_host_worker_thread(void* context) {
         bool have_ctrl = tp->ctrl_valid;
         FURI_CRITICAL_EXIT();
 
-        bool present = onewire_host_reset(tp->host);
+        bool present = ibtn_tp_host_reset_atomic(tp->host);
         if(present) tp->dbg_present++;
 
         if(present && have_ctrl) {
@@ -202,17 +239,17 @@ static int32_t ibtn_tp_host_worker_thread(void* context) {
             }
             FURI_CRITICAL_EXIT();
             if(got) {
-                onewire_host_write(tp->host, IBTN_TP_CMD_PUSH);
-                onewire_host_write(tp->host, ctrl.len);
-                onewire_host_write_bytes(tp->host, ctrl.data, ctrl.len);
+                ibtn_tp_host_write_atomic(tp->host, IBTN_TP_CMD_PUSH);
+                ibtn_tp_host_write_atomic(tp->host, ctrl.len);
+                ibtn_tp_host_write_bytes_atomic(tp->host, ctrl.data, ctrl.len);
             }
         } else if(present) {
-            onewire_host_write(tp->host, IBTN_TP_CMD_POLL);
-            uint8_t len = onewire_host_read(tp->host);
+            ibtn_tp_host_write_atomic(tp->host, IBTN_TP_CMD_POLL);
+            uint8_t len = ibtn_tp_host_read_atomic(tp->host);
             // len == 0: nothing queued. Out of range: glitch -> abort, the next
             // reset resynchronizes.
             if(len >= 1 && len <= FSH_PACKET_MAX) {
-                onewire_host_read_bytes(tp->host, buf, len);
+                ibtn_tp_host_read_bytes_atomic(tp->host, buf, len);
                 tp->dbg_pkts++;
                 fsh_receive_callback(buf, len);
             }
@@ -258,6 +295,10 @@ void ibutton_transport_init(IbtnTransportMode mode) {
 
         tp->host_worker =
             furi_thread_alloc_ex("IbtnHostWorker", 2048, ibtn_tp_host_worker_thread, tp);
+        // High priority so the worker is not preempted for long BETWEEN the
+        // per-byte critical sections — a >15 ms gap mid-transaction would trip
+        // the slave's slot timeout and drop the frame.
+        furi_thread_set_priority(tp->host_worker, FuriThreadPriorityHigh);
         furi_thread_start(tp->host_worker);
     }
 
