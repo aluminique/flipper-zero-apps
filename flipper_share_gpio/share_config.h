@@ -9,7 +9,7 @@
 // ===== Engine-facing tunables (consumed by share.c / the scenes) =============
 
 // Name of this transport, substituted into every UI string ("Send via ...").
-#define FSH_TRANSPORT_NAME "Wire"
+#define FSH_TRANSPORT_NAME "GPIO"
 
 // File-data bytes per DATA packet. A 73-byte DATA packet is ~45 ms of bus time
 // that the sender bit-bangs inside an interrupt/critical section (see README
@@ -46,7 +46,7 @@
 // No new block for this long -> the receiver GUI shows "stalled".
 #define FSH_STALL_MS 5000u
 
-// ===== 1-Wire transport internals (consumed by wire_transport.c) ==========
+// ===== 1-Wire transport internals (consumed by gpio_transport.c) ==========
 
 // Bus pin. PA4 = GPIO header pin 4, a plain GPIO with no on-board analog
 // circuitry, bussed with one jumper wire (pin 4 <-> pin 4) plus GND.
@@ -60,20 +60,20 @@
 // so onewire_slave_start() furi_check-fails there. PA4's EXTI line (4) is free
 // (it is otherwise only the external-SPI chip-select, inactive here) and the
 // host supplies the bus pull-up with the STM32 internal resistor.
-#define WIRE_TP_GPIO (&gpio_ext_pa4)
+#define GPIO_TP_GPIO (&gpio_ext_pa4)
 
 // Custom link-layer command bytes. Deliberately outside every standard 1-Wire
 // ROM command (0x33 READ ROM, 0xCC SKIP ROM, 0xF0 SEARCH ROM, ...) so a foreign
 // 1-Wire master touching the sender does nothing.
-#define WIRE_TP_CMD_POLL 0xA1 // slave -> host: len(1) + len packet bytes (len 0 = nothing queued)
-#define WIRE_TP_CMD_PUSH 0xA2 // host -> slave: len(1) + len packet bytes
+#define GPIO_TP_CMD_POLL 0xA1 // slave -> host: len(1) + len packet bytes (len 0 = nothing queued)
+#define GPIO_TP_CMD_PUSH 0xA2 // host -> slave: len(1) + len packet bytes
 
 // Host pacing: gap between transactions, and retry period while no presence.
-#define WIRE_TP_POLL_INTERVAL_MS 5u
-#define WIRE_TP_RECONNECT_MS 250u
+#define GPIO_TP_POLL_INTERVAL_MS 5u
+#define GPIO_TP_RECONNECT_MS 250u
 
 // Outbound DATA mailbox: how long fsh_transport_send() blocks when it is full
 // (this backpressure paces the sender's block stream) and the mailbox / RX
 // queue depth.
-#define WIRE_TP_SEND_TIMEOUT_MS 500u
-#define WIRE_TP_QUEUE_DEPTH 4u
+#define GPIO_TP_SEND_TIMEOUT_MS 500u
+#define GPIO_TP_QUEUE_DEPTH 4u

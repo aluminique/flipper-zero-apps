@@ -1,11 +1,11 @@
-# Flipper Share Wire — direct file transfer between Flippers over a GPIO wire
+# Flipper Share GPIO — direct file transfer between Flippers over a GPIO wire
 
-> **⚠️ WARNING:** Flipper Share Wire is an **experimental-only** app, it is not recommended for regular use.
+> **⚠️ WARNING:** Flipper Share GPIO is an **experimental-only** app, it is not recommended for regular use.
 > Consider using other Flipper Share transports (NFC, Sub-GHz, IR) for everyday file transfer.
 
 ## Overview
 
-**Flipper Share Wire** transfers any file directly from one Flipper Zero to another over a
+**Flipper Share GPIO** transfers any file directly from one Flipper Zero to another over a
 plain **GPIO jumper wire** — no extra hardware, phone, computer, internet or radio needed.
 Jumper **pin 4 ↔ pin 4** and **GND ↔ GND**, and the transfer runs.
 
@@ -34,8 +34,8 @@ Features:
 # Usage
 
 1. Wire **pin 4 ↔ pin 4** and **GND ↔ GND** between the two Flippers (any GND pin).
-2. On the receiving Flipper: open Flipper Share Wire → **Receive via Wire**.
-3. On the sending Flipper: open Flipper Share Wire → **Send via Wire** → pick a file → **OK**.
+2. On the receiving Flipper: open Flipper Share GPIO → **Receive via GPIO**.
+3. On the sending Flipper: open Flipper Share GPIO → **Send via GPIO** → pick a file → **OK**.
 4. Hold the connection until it completes. The receiver shows a progress bar and verifies
    the MD5 at the end; the file is saved to `/ext/inbox/`.
 
@@ -46,7 +46,7 @@ reset/presence pulse, so the link resynchronizes by itself.
 
 ---
 
-# Flipper Share Wire protocol
+# Flipper Share GPIO protocol
 
 Two layers: a **1-Wire transport** (physical/link layer) under the existing
 **file-transfer protocol** (selective-repeat ARQ). The file-transfer protocol is identical

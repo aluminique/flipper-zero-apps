@@ -1,13 +1,13 @@
 App(
-    appid="flipper_share_wire",
-    name="Flipper Share Wire",
+    appid="flipper_share_gpio",
+    name="Flipper Share GPIO",
     apptype=FlipperAppType.EXTERNAL,
     entry_point="share_app",
     stack_size=2 * 1024,
     fap_category="GPIO",
     fap_version="0.1",
-    fap_icon="wire_share.png",
+    fap_icon="gpio_share.png",
     fap_description="Direct file transfer between flippers over a GPIO wire (1-Wire link)",
     fap_author="@lomalkin",
-    fap_weburl="https://github.com/lomalkin/flipper-zero-apps/blob/-/flipper_share_wire",
+    fap_weburl="https://github.com/lomalkin/flipper-zero-apps/blob/-/flipper_share_gpio",
 )

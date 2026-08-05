@@ -25,19 +25,19 @@
 #include <stddef.h>
 
 typedef enum {
-    WireTransportModeSlave, // sender: 1-Wire slave (emulator), answers the host
-    WireTransportModeHost, // receiver: 1-Wire host, drives the bus
-} WireTransportMode;
+    GpioTransportModeSlave, // sender: 1-Wire slave (emulator), answers the host
+    GpioTransportModeHost, // receiver: 1-Wire host, drives the bus
+} GpioTransportMode;
 
 // Allocate resources and start the 1-Wire stack in the given role.
-void wire_transport_init(WireTransportMode mode);
+void gpio_transport_init(GpioTransportMode mode);
 
 // Stop the 1-Wire stack and free resources. The caller MUST have already
 // stopped any thread that calls fsh_transport_send().
-void wire_transport_deinit(void);
+void gpio_transport_deinit(void);
 
 // Pause bus activity once the transfer is finished, without tearing the
-// transport down (that stays with wire_transport_deinit on the scene
+// transport down (that stays with gpio_transport_deinit on the scene
 // thread). Thread-safe: only sets a flag observed by the host worker. No-op for
 // the slave role (the emulation simply stops answering after deinit).
-void wire_transport_stop_field(void);
+void gpio_transport_stop_field(void);

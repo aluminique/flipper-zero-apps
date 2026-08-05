@@ -4,7 +4,7 @@
 #include <furi_hal_power.h>
 #include <stdlib.h>
 
-#include "wire_transport.h"
+#include "gpio_transport.h"
 #include "share.h"
 #include "share_scene.h"
 
@@ -78,7 +78,7 @@ static int32_t file_read_worker_thread(void* context) {
             // thread. Harmless if it kept polling (section 7), but idling the bus
             // is cleaner.
             if(!field_stopped) {
-                wire_transport_stop_field();
+                gpio_transport_stop_field();
                 field_stopped = true;
             }
         }
@@ -306,7 +306,7 @@ void share_scene_receive_on_enter(void* context) {
     furi_timer_start(app->timer, SCENE_UI_UPDATE_PERIOD_MS);
 
     // Receiver role: 1-Wire host; drives the bus and the POLL/PUSH loop.
-    wire_transport_init(WireTransportModeHost);
+    gpio_transport_init(GpioTransportModeHost);
 }
 
 static void update_timer_callback(void* context) {
@@ -483,7 +483,7 @@ void share_scene_receive_on_exit(void* context) {
     // Ensure progress view is deinitialized if it was created
     progress_view_deinit(app);
 
-    wire_transport_deinit();
+    gpio_transport_deinit();
 
     // Clean up resources
     if(app->file_reading_state) {

@@ -4,7 +4,7 @@
 #include <furi_hal_power.h>
 #include <stdlib.h>
 
-#include "wire_transport.h"
+#include "gpio_transport.h"
 #include "share.h"
 
 #define FSH_IDLE_OPERATION 5 //ms (paces fsh_idle; the mailbox backpressure is the real pacing)
@@ -102,7 +102,7 @@ void share_scene_send_on_enter(void* context) {
     furi_timer_start(app->timer, SCENE_UI_UPDATE_PERIOD_MS);
 
     // Sender role: 1-Wire slave (emulator); the receiver drives the bus.
-    wire_transport_init(WireTransportModeSlave);
+    gpio_transport_init(GpioTransportModeSlave);
 }
 
 // Callback for handling button presses in the dialog
@@ -240,7 +240,7 @@ bool share_scene_send_on_event(void* context, SceneManagerEvent event) {
 void share_scene_send_on_exit(void* context) {
     ShareApp* app = context;
 
-    wire_transport_deinit();
+    gpio_transport_deinit();
 
     // Free resources
     if(app->file_reading_state) {

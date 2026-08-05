@@ -24,7 +24,7 @@
 // (file-data bytes per packet); it is decoupled from the control-packet size so
 // it can be resized without limiting the file name length. It is defined in the
 // per-app share_config.h — for this transport keep FSH_PACKET_MAX within the
-// single length byte of the 1-Wire link layer (asserted in wire_transport.c).
+// single length byte of the 1-Wire link layer (asserted in gpio_transport.c).
 #define FSH_DATA_PAYLOAD_LENGTH (FSH_DATA_LENGTH + 4u)                  // block_number + data
 #define FSH_DATA_PACKET_LENGTH (FSH_DATA_PAYLOAD_LENGTH + FSH_OVERHEAD_LENGTH)
 
@@ -182,7 +182,7 @@ void fsh_send_data(void);
 // through these two neutral symbols, so this header stays byte-identical across
 // all Flipper Share apps.
 //   TX: the engine calls this (wired as cb_send_bytes) — implemented by the
-//       per-app transport (here wire_transport.c).
+//       per-app transport (here gpio_transport.c).
 //   RX: the transport calls this with each complete received packet, always
 //       from a thread context (never from an ISR).
 void fsh_transport_send(const uint8_t* buf, size_t len);

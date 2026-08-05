@@ -1,5 +1,5 @@
-#include "wire_transport.h"
-#include "share.h" // FSH_* sizes, share_config.h (WIRE_TP_*), fsh_transport_send/receive_callback
+#include "gpio_transport.h"
+#include "share.h" // FSH_* sizes, share_config.h (GPIO_TP_*), fsh_transport_send/receive_callback
 
 #include <furi.h>
 #include <furi_hal.h>
@@ -7,7 +7,7 @@
 #include <one_wire/one_wire_host.h>
 #include <one_wire/one_wire_slave.h>
 
-#define TAG "WireTransport"
+#define TAG "GpioTransport"
 
 // One length byte prefixes every payload on the wire, so a whole flipper-share
 // packet must fit in it.
@@ -17,16 +17,16 @@ _Static_assert(FSH_PACKET_MAX <= 255, "flipper-share packet must fit a single le
 typedef struct {
     uint8_t len;
     uint8_t data[FSH_PACKET_MAX];
-} IbtnTpPacket;
+} GpioTpPacket;
 
 typedef struct {
-    WireTransportMode mode;
+    GpioTransportMode mode;
 
     // Slave (sender) side: the emulation answers host transactions in the 1-Wire
     // interrupt; PUSH'd frames are handed to the RX worker for thread-context
     // delivery to the engine.
     OneWireSlave* slave;
-    FuriMessageQueue* rx_queue; // ISR (command callback) -> IbtnRxWorker
+    FuriMessageQueue* rx_queue; // ISR (command callback) -> GpioRxWorker
     FuriThread* rx_worker;
 
     // Host (receiver) side: this worker owns the bus exclusively and drives the
@@ -35,7 +35,7 @@ typedef struct {
     FuriThread* host_worker;
 
     // Outbound DATA mailbox (slave only). fsh_transport_send() blocks up to
-    // WIRE_TP_SEND_TIMEOUT_MS when full — the backpressure that paces the
+    // GPIO_TP_SEND_TIMEOUT_MS when full — the backpressure that paces the
     // sender's block stream.
     FuriMessageQueue* tx_queue;
 
@@ -44,21 +44,21 @@ typedef struct {
     // starve control traffic. Written by fsh_transport_send() under
     // FURI_CRITICAL; read by the slave command callback (ISR) or the host
     // worker. A newer control packet supersedes an older unsent one.
-    IbtnTpPacket ctrl_pkt;
+    GpioTpPacket ctrl_pkt;
     volatile bool ctrl_valid;
 
     volatile bool worker_stop;
     volatile bool dormant; // host: pause polling after the transfer finishes
-} WireTransport;
+} GpioTransport;
 
 // Owned by the scene lifecycle: init in on_enter, deinit in on_exit, and no
 // thread calls fsh_transport_send() during deinit (workers joined first).
-static WireTransport* wire_tp = NULL;
+static GpioTransport* gpio_tp = NULL;
 
 // ===== Engine -> transport (TX) ==============================================
 
 void fsh_transport_send(const uint8_t* buf, size_t len) {
-    WireTransport* tp = wire_tp;
+    GpioTransport* tp = gpio_tp;
     if(!tp) return; // transport not running — drop, ARQ recovers
     if(len <= FSH_HEADER_LENGTH || len > FSH_PACKET_MAX) {
         FURI_LOG_E(TAG, "bad packet length %zu", len);
@@ -79,10 +79,10 @@ void fsh_transport_send(const uint8_t* buf, size_t len) {
         return;
     }
 
-    IbtnTpPacket pkt;
+    GpioTpPacket pkt;
     pkt.len = (uint8_t)len;
     memcpy(pkt.data, buf, len);
-    if(furi_message_queue_put(tp->tx_queue, &pkt, furi_ms_to_ticks(WIRE_TP_SEND_TIMEOUT_MS)) !=
+    if(furi_message_queue_put(tp->tx_queue, &pkt, furi_ms_to_ticks(GPIO_TP_SEND_TIMEOUT_MS)) !=
        FuriStatusOk) {
         FURI_LOG_W(TAG, "TX mailbox full, DATA packet dropped");
     }
@@ -92,7 +92,7 @@ void fsh_transport_send(const uint8_t* buf, size_t len) {
 
 // Pick the next outbound packet for a POLL: control slot first, then the DATA
 // queue. Runs in the 1-Wire interrupt/critical context.
-static bool wire_tp_pop_outbound_isr(WireTransport* tp, IbtnTpPacket* out) {
+static bool gpio_tp_pop_outbound_isr(GpioTransport* tp, GpioTpPacket* out) {
     // We are already inside the 1-Wire critical section (IRQ), so the
     // FURI_CRITICAL writer in fsh_transport_send cannot be mid-update here.
     if(tp->ctrl_valid) {
@@ -105,7 +105,7 @@ static bool wire_tp_pop_outbound_isr(WireTransport* tp, IbtnTpPacket* out) {
 }
 
 // Participate in normal-speed resets only (no overdrive between two Flippers).
-static bool wire_tp_slave_reset_callback(bool is_short, void* context) {
+static bool gpio_tp_slave_reset_callback(bool is_short, void* context) {
     UNUSED(context);
     return !is_short;
 }
@@ -113,13 +113,13 @@ static bool wire_tp_slave_reset_callback(bool is_short, void* context) {
 // 1-Wire interrupt/critical context: no blocking furi calls, no mutexes, no
 // storage I/O here. One command per reset (the host issues a fresh reset for the
 // next transaction), so always return false.
-static bool wire_tp_slave_command_callback(uint8_t command, void* context) {
-    WireTransport* tp = context;
+static bool gpio_tp_slave_command_callback(uint8_t command, void* context) {
+    GpioTransport* tp = context;
     OneWireSlave* bus = tp->slave;
 
-    if(command == WIRE_TP_CMD_POLL) {
-        IbtnTpPacket pkt;
-        if(wire_tp_pop_outbound_isr(tp, &pkt)) {
+    if(command == GPIO_TP_CMD_POLL) {
+        GpioTpPacket pkt;
+        if(gpio_tp_pop_outbound_isr(tp, &pkt)) {
             // len byte then the packet bytes. On a bus error the packet is
             // already dequeued and is lost — the engine's ARQ re-requests it.
             if(onewire_slave_send(bus, &pkt.len, 1)) {
@@ -129,12 +129,12 @@ static bool wire_tp_slave_command_callback(uint8_t command, void* context) {
             const uint8_t nothing = 0x00; // len = 0: nothing queued
             onewire_slave_send(bus, &nothing, 1);
         }
-    } else if(command == WIRE_TP_CMD_PUSH) {
+    } else if(command == GPIO_TP_CMD_PUSH) {
         uint8_t len = 0;
         // Invalid length aborts the transaction (leave the bus idle; the next
         // reset resynchronizes).
         if(onewire_slave_receive(bus, &len, 1) && len >= 1 && len <= FSH_PACKET_MAX) {
-            IbtnTpPacket frame;
+            GpioTpPacket frame;
             frame.len = len;
             if(onewire_slave_receive(bus, frame.data, len)) {
                 // 0 timeout in IRQ context -> xQueueSendToBackFromISR; drop on a
@@ -149,9 +149,9 @@ static bool wire_tp_slave_command_callback(uint8_t command, void* context) {
 }
 
 // Drains PUSH'd frames and delivers them to the engine in thread context.
-static int32_t wire_tp_rx_worker_thread(void* context) {
-    WireTransport* tp = context;
-    IbtnTpPacket frame;
+static int32_t gpio_tp_rx_worker_thread(void* context) {
+    GpioTransport* tp = context;
+    GpioTpPacket frame;
 
     while(!tp->worker_stop) {
         // Timed get so the stop flag is checked promptly on deinit.
@@ -176,36 +176,36 @@ static int32_t wire_tp_rx_worker_thread(void* context) {
 // (~0.6-1.2 ms of interrupts-off), leaving gaps between bytes for the system to
 // breathe; the slave tolerates inter-byte gaps up to its 15 ms slot timeout.
 
-static bool wire_tp_host_reset_atomic(OneWireHost* host) {
+static bool gpio_tp_host_reset_atomic(OneWireHost* host) {
     FURI_CRITICAL_ENTER();
     bool present = onewire_host_reset(host);
     FURI_CRITICAL_EXIT();
     return present;
 }
 
-static void wire_tp_host_write_atomic(OneWireHost* host, uint8_t byte) {
+static void gpio_tp_host_write_atomic(OneWireHost* host, uint8_t byte) {
     FURI_CRITICAL_ENTER();
     onewire_host_write(host, byte);
     FURI_CRITICAL_EXIT();
 }
 
-static uint8_t wire_tp_host_read_atomic(OneWireHost* host) {
+static uint8_t gpio_tp_host_read_atomic(OneWireHost* host) {
     FURI_CRITICAL_ENTER();
     uint8_t value = onewire_host_read(host);
     FURI_CRITICAL_EXIT();
     return value;
 }
 
-static void wire_tp_host_write_bytes_atomic(OneWireHost* host, const uint8_t* buf, size_t len) {
-    for(size_t i = 0; i < len; i++) wire_tp_host_write_atomic(host, buf[i]);
+static void gpio_tp_host_write_bytes_atomic(OneWireHost* host, const uint8_t* buf, size_t len) {
+    for(size_t i = 0; i < len; i++) gpio_tp_host_write_atomic(host, buf[i]);
 }
 
-static void wire_tp_host_read_bytes_atomic(OneWireHost* host, uint8_t* buf, size_t len) {
-    for(size_t i = 0; i < len; i++) buf[i] = wire_tp_host_read_atomic(host);
+static void gpio_tp_host_read_bytes_atomic(OneWireHost* host, uint8_t* buf, size_t len) {
+    for(size_t i = 0; i < len; i++) buf[i] = gpio_tp_host_read_atomic(host);
 }
 
-static int32_t wire_tp_host_worker_thread(void* context) {
-    WireTransport* tp = context;
+static int32_t gpio_tp_host_worker_thread(void* context) {
+    GpioTransport* tp = context;
     uint8_t buf[FSH_PACKET_MAX];
 
     while(!tp->worker_stop) {
@@ -220,10 +220,10 @@ static int32_t wire_tp_host_worker_thread(void* context) {
         bool have_ctrl = tp->ctrl_valid;
         FURI_CRITICAL_EXIT();
 
-        bool present = wire_tp_host_reset_atomic(tp->host);
+        bool present = gpio_tp_host_reset_atomic(tp->host);
 
         if(present && have_ctrl) {
-            IbtnTpPacket ctrl;
+            GpioTpPacket ctrl;
             bool got = false;
             FURI_CRITICAL_ENTER();
             if(tp->ctrl_valid) {
@@ -233,32 +233,32 @@ static int32_t wire_tp_host_worker_thread(void* context) {
             }
             FURI_CRITICAL_EXIT();
             if(got) {
-                wire_tp_host_write_atomic(tp->host, WIRE_TP_CMD_PUSH);
-                wire_tp_host_write_atomic(tp->host, ctrl.len);
-                wire_tp_host_write_bytes_atomic(tp->host, ctrl.data, ctrl.len);
+                gpio_tp_host_write_atomic(tp->host, GPIO_TP_CMD_PUSH);
+                gpio_tp_host_write_atomic(tp->host, ctrl.len);
+                gpio_tp_host_write_bytes_atomic(tp->host, ctrl.data, ctrl.len);
             }
         } else if(present) {
-            wire_tp_host_write_atomic(tp->host, WIRE_TP_CMD_POLL);
-            uint8_t len = wire_tp_host_read_atomic(tp->host);
+            gpio_tp_host_write_atomic(tp->host, GPIO_TP_CMD_POLL);
+            uint8_t len = gpio_tp_host_read_atomic(tp->host);
             // len == 0: nothing queued. Out of range: glitch -> abort, the next
             // reset resynchronizes.
             if(len >= 1 && len <= FSH_PACKET_MAX) {
-                wire_tp_host_read_bytes_atomic(tp->host, buf, len);
+                gpio_tp_host_read_bytes_atomic(tp->host, buf, len);
                 fsh_receive_callback(buf, len);
             }
         }
 
-        furi_delay_ms(present ? WIRE_TP_POLL_INTERVAL_MS : WIRE_TP_RECONNECT_MS);
+        furi_delay_ms(present ? GPIO_TP_POLL_INTERVAL_MS : GPIO_TP_RECONNECT_MS);
     }
     return 0;
 }
 
 // ===== Public API ============================================================
 
-void wire_transport_init(WireTransportMode mode) {
-    furi_assert(wire_tp == NULL);
+void gpio_transport_init(GpioTransportMode mode) {
+    furi_assert(gpio_tp == NULL);
 
-    WireTransport* tp = malloc(sizeof(WireTransport));
+    GpioTransport* tp = malloc(sizeof(GpioTransport));
     memset(tp, 0, sizeof(*tp));
     tp->mode = mode;
     tp->ctrl_valid = false;
@@ -269,21 +269,21 @@ void wire_transport_init(WireTransportMode mode) {
     // it, but keeping the mailbox structure symmetric means fsh_transport_send()
     // needs no per-role branch). The RX queue is slave-only (the host receives
     // inline on its worker thread, not via an interrupt).
-    tp->tx_queue = furi_message_queue_alloc(WIRE_TP_QUEUE_DEPTH, sizeof(IbtnTpPacket));
+    tp->tx_queue = furi_message_queue_alloc(GPIO_TP_QUEUE_DEPTH, sizeof(GpioTpPacket));
 
-    if(mode == WireTransportModeSlave) {
-        tp->rx_queue = furi_message_queue_alloc(WIRE_TP_QUEUE_DEPTH, sizeof(IbtnTpPacket));
+    if(mode == GpioTransportModeSlave) {
+        tp->rx_queue = furi_message_queue_alloc(GPIO_TP_QUEUE_DEPTH, sizeof(GpioTpPacket));
 
-        tp->slave = onewire_slave_alloc(WIRE_TP_GPIO);
-        onewire_slave_set_reset_callback(tp->slave, wire_tp_slave_reset_callback, tp);
-        onewire_slave_set_command_callback(tp->slave, wire_tp_slave_command_callback, tp);
+        tp->slave = onewire_slave_alloc(GPIO_TP_GPIO);
+        onewire_slave_set_reset_callback(tp->slave, gpio_tp_slave_reset_callback, tp);
+        onewire_slave_set_command_callback(tp->slave, gpio_tp_slave_command_callback, tp);
 
-        tp->rx_worker = furi_thread_alloc_ex("IbtnRxWorker", 2048, wire_tp_rx_worker_thread, tp);
+        tp->rx_worker = furi_thread_alloc_ex("GpioRxWorker", 2048, gpio_tp_rx_worker_thread, tp);
         furi_thread_start(tp->rx_worker);
 
         onewire_slave_start(tp->slave);
     } else {
-        tp->host = onewire_host_alloc(WIRE_TP_GPIO);
+        tp->host = onewire_host_alloc(GPIO_TP_GPIO);
         onewire_host_start(tp->host);
         // The bus pin (PA4, header pin 4) has no on-board pull-up, and the
         // firmware host driver configures the pin with no pull at all — a
@@ -294,10 +294,10 @@ void wire_transport_init(WireTransportMode mode) {
         // furi_hal_gpio_write()s the pin afterwards (never re-init), so the
         // pull-up sticks. (Keep the jumper short — a long/loaded bus needs a
         // real external ~4.7k pull-up.)
-        furi_hal_gpio_init(WIRE_TP_GPIO, GpioModeOutputOpenDrain, GpioPullUp, GpioSpeedLow);
+        furi_hal_gpio_init(GPIO_TP_GPIO, GpioModeOutputOpenDrain, GpioPullUp, GpioSpeedLow);
 
         tp->host_worker =
-            furi_thread_alloc_ex("IbtnHostWorker", 2048, wire_tp_host_worker_thread, tp);
+            furi_thread_alloc_ex("GpioHostWorker", 2048, gpio_tp_host_worker_thread, tp);
         // High priority so the worker is not preempted for long BETWEEN the
         // per-byte critical sections — a >15 ms gap mid-transaction would trip
         // the slave's slot timeout and drop the frame.
@@ -305,18 +305,18 @@ void wire_transport_init(WireTransportMode mode) {
         furi_thread_start(tp->host_worker);
     }
 
-    wire_tp = tp; // publish only when fully started
-    FURI_LOG_I(TAG, "started as %s", mode == WireTransportModeSlave ? "slave" : "host");
+    gpio_tp = tp; // publish only when fully started
+    FURI_LOG_I(TAG, "started as %s", mode == GpioTransportModeSlave ? "slave" : "host");
 }
 
-void wire_transport_deinit(void) {
-    WireTransport* tp = wire_tp;
+void gpio_transport_deinit(void) {
+    GpioTransport* tp = gpio_tp;
     if(!tp) return;
-    wire_tp = NULL; // sends become no-ops first
+    gpio_tp = NULL; // sends become no-ops first
 
     tp->worker_stop = true;
 
-    if(tp->mode == WireTransportModeSlave) {
+    if(tp->mode == GpioTransportModeSlave) {
         // Stop the emulation first so the interrupt can no longer touch rx_queue
         // (onewire_slave_stop removes the pin's EXTI callback), then join the
         // worker and free the queues.
@@ -342,16 +342,16 @@ void wire_transport_deinit(void) {
 
     // Leave the bus pin in a known idle state (input, no pull) whichever role ran,
     // so the next Send/Receive starts from a clean pin regardless of driver quirks.
-    furi_hal_gpio_init(WIRE_TP_GPIO, GpioModeAnalog, GpioPullNo, GpioSpeedLow);
+    furi_hal_gpio_init(GPIO_TP_GPIO, GpioModeAnalog, GpioPullNo, GpioSpeedLow);
 
     if(tp->tx_queue) furi_message_queue_free(tp->tx_queue);
     free(tp);
     FURI_LOG_I(TAG, "stopped");
 }
 
-void wire_transport_stop_field(void) {
+void gpio_transport_stop_field(void) {
     // Only sets a flag observed by the host worker, so it is safe to call from
     // any thread. No-op for the slave (its emulation stops at deinit).
-    WireTransport* tp = wire_tp;
+    GpioTransport* tp = gpio_tp;
     if(tp) tp->dormant = true;
 }
