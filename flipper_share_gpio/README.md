@@ -6,29 +6,31 @@
 ## Overview
 
 **Flipper Share GPIO** transfers any file directly from one Flipper Zero to another over a
-plain **GPIO jumper wire** — no extra hardware, phone, computer, internet or radio needed.
-Jumper **pin 4 ↔ pin 4** and **GND ↔ GND**, and the transfer runs.
+plain **GPIO jumper wire** — no extra hardware, no external components, no phone, computer,
+internet or radio needed. Jumper **pin 4 ↔ pin 4** and **GND ↔ GND**, and the transfer runs.
 
-It is the generic-wire sibling of Flipper Share iButton: the same resumable,
-integrity-checked file-transfer protocol and the same 1-Wire host/slave transport, but the
-bus is an ordinary GPIO (PA4) instead of the iButton pad. On a plain GPIO there is no pad
-pull-up divider to fight, so the link is more predictable — the host just drives the pull-up
-from the STM32's internal resistor.
+It is a one-way (carousel) link built on a small custom **pulse-distance modem**. The line
+idles high; the sender marks every bit boundary with a short LOW "tick" — a fast, actively
+driven falling edge — and encodes each bit in the **time between consecutive falling edges**
+(short = 0, long = 1, very long = frame start), exactly like an NEC infrared remote. The
+receiver only ever timestamps falling edges, so the slow rise of an open-drain wire (there is
+no external pull-up, only the chip's internal ~40 kΩ) is never on the critical path.
 
-Actual transfer speed is around **1.2 KB/s** (bench-measured; e.g. 8 KB in ~7 s).
+Transfer speed is roughly **4–5 KB/s** from the modem timing budget (bench measurement
+pending). The high-level file-transfer protocol — resumable, integrity-checked — is the same
+as the other Flipper Share builds.
 
 Other Flipper Share transports (Sub-GHz, IR, NFC & more): [github.com/lomalkin/flipper-zero-apps](https://github.com/lomalkin/flipper-zero-apps)
 
 Features:
 
-- Works out of the box on any Flipper Zero — two GPIO pins on the header, one jumper wire
-  plus a ground wire. Builds with `ufbt` against the official firmware; no firmware
-  modification.
+- Works out of the box on any Flipper Zero — two GPIO header pins, one jumper wire plus a
+  ground wire. Builds with `ufbt` against the official firmware; no firmware modification.
 - Integrity check with an MD5 hash after reception; per-packet CRC16.
-- Automatic retransmission of lost/corrupted packets — the transfer continues "until
-  success". Unplugging and reconnecting the wire mid-transfer resumes where it left off.
-- Half-duplex command/response link: the receiver drives the bus (1-Wire host), the sender
-  answers as a 1-Wire slave (emulator).
+- Resumes automatically: unplug and reconnect the wire mid-transfer and the receiver's block
+  bitmap picks up the missing blocks on a later carousel pass.
+- One-way on the wire (carousel): the sender broadcasts continuously, the receiver never
+  transmits — so there is no handshake and nothing to get out of sync.
 - Torrent-like progress bar on the receiver; filename/size and ETA on the sender.
 
 # Usage
@@ -36,73 +38,81 @@ Features:
 1. Wire **pin 4 ↔ pin 4** and **GND ↔ GND** between the two Flippers (any GND pin).
 2. On the receiving Flipper: open Flipper Share GPIO → **Receive via GPIO**.
 3. On the sending Flipper: open Flipper Share GPIO → **Send via GPIO** → pick a file → **OK**.
-4. Hold the connection until it completes. The receiver shows a progress bar and verifies
-   the MD5 at the end; the file is saved to `/ext/inbox/`.
+4. Hold the connection until it completes. The receiver shows a progress bar and verifies the
+   MD5 at the end; the file is saved to `/ext/inbox/`.
 
 The sender shows the file name, size and a rough ETA. The receiver shows
-"Waiting for announce..." until it locks, then the progress bar with percentage and ETA.
-A brief wire interruption is harmless — every transaction starts with a 1-Wire
-reset/presence pulse, so the link resynchronizes by itself.
+"Waiting for announce..." until it locks, then the progress bar with percentage and ETA. A
+brief wire interruption is harmless — the receiver simply resumes on the next carousel pass.
 
 ---
 
 # Flipper Share GPIO protocol
 
-Two layers: a **1-Wire transport** (physical/link layer) under the existing
-**file-transfer protocol** (selective-repeat ARQ). The file-transfer protocol is identical
-to the other Flipper Share builds; only the transport differs.
+Two layers: a **pulse-distance modem** (physical/link layer) under the existing
+**file-transfer protocol**, run in a one-way **carousel** mode. The file-transfer protocol is
+identical to the other Flipper Share builds; only the transport differs.
 
-## Physical / link layer — the 1-Wire transport
+## Why this design (the physics)
 
-- **Bus:** standard-speed 1-Wire on `gpio_ext_pa4` (PA4 — header pin 4). One slot ≈ 73 µs/bit
-  → ~0.6 ms/byte. PA4 is a plain GPIO with a free EXTI line (needed by the slave emulator)
-  and no on-board analog circuitry, so it is a clean point-to-point bus. Overdrive mode is
-  not used: the slave side is a software bit-banger in a critical section.
-- **Role mapping:** the **receiver** is the 1-Wire **host** — it drives the bus and owns all
-  timing; the **sender** is the 1-Wire **slave** (emulator) and answers in read slots. This
-  matches the other transports, where the sender is the passive side (NFC listener, RFID tag).
-- **Deterministic host timing:** each reset/read/write runs inside a short `FURI_CRITICAL`
-  section on the host, so a busy USB stack cannot stretch a 1-Wire slot and corrupt the byte.
-- **Transactions:** the host drives every exchange as
-  `reset → presence → command byte → payload`, using two custom commands:
+A single open-drain wire pulled up only by the STM32's internal ~40 kΩ resistor has a strongly
+**asymmetric** edge behaviour: the **falling** edge is fast (actively driven to ground in well
+under a microsecond) while the **rising** edge is slow (an RC ramp of several microseconds
+through the weak pull-up). A faster bidirectional scheme (1-Wire overdrive) fails here because
+it must sample the bus right after a rising edge, inside a ~1–3 µs window the slow ramp cannot
+meet. This modem sidesteps that entirely: **all information is carried on falling edges**, and
+the slow rise only has to finish somewhere inside the following gap — it is never timed.
 
-  | Command | Direction after command byte | Payload |
-  |---|---|---|
-  | `WIRE_TP_CMD_POLL` `0xA1` | slave → host | `len(1)` + `len` packet bytes; `len = 0x00` means "nothing queued" |
-  | `WIRE_TP_CMD_PUSH` `0xA2` | host → slave | `len(1)` + `len` packet bytes |
+## Physical / link layer — the pulse-distance modem (`gpio_modem.*`)
 
-  `len` must be `1..FSH_PACKET_MAX`; anything else aborts the transaction on both sides and
-  the next reset resynchronizes. The command codes deliberately avoid the standard 1-Wire ROM
-  commands (`0x33` READ ROM, `0xCC` SKIP ROM, `0xF0` SEARCH ROM, …), so a foreign 1-Wire
-  reader touching the sender gets nothing. There is no ROM search or addressing — this is a
-  point-to-point link with exactly two devices.
-- **No link-layer CRC:** integrity is the packet's own CRC16 (checked by the engine) plus the
-  whole-file MD5. A corrupted transaction either fails in the 1-Wire driver or is dropped on
-  CRC16 — both silent, and the ARQ re-requests.
-- **Outbound mailbox:** the engine's `fsh_transport_send` enqueues packets into a 4-deep queue
-  for DATA, plus a single latest-wins slot for control packets (ANNOUNCE / REQUEST) that is
-  drained first, so a DATA stream can never starve control traffic. A full data queue blocks
-  the sender for up to `WIRE_TP_SEND_TIMEOUT_MS`, which is the natural backpressure that paces
-  the engine.
-- **Resume:** if the wire is interrupted, the host simply sees no presence pulse and retries
-  every `WIRE_TP_RECONNECT_MS`. On reconnect, the receiver's block bitmap re-requests only the
-  missing blocks, so the transfer continues where it stopped.
-- **ISR discipline:** the slave's command/reset callbacks run in the GPIO EXTI interrupt inside
-  a `FURI_CRITICAL` section, so those paths use only zero-timeout `furi_message_queue_put/get`
-  (which route to the `*FromISR` variants) and a `FURI_CRITICAL`-guarded control slot — no
-  mutexes, no storage I/O, nothing blocking. Received frames are handed to a worker thread,
-  which calls `fsh_receive_callback` in thread context, exactly as the engine expects.
+- **Idle:** the line rests high (receiver pull-up enabled; the sender drives it open-drain and
+  releases between ticks).
+- **Tick:** the sender pulls the line low for `GPIO_MODEM_TICK_US` (~3 µs) — a clean falling
+  edge — then releases it.
+- **Symbol = fall-to-fall interval:** the bit is the time from one falling edge to the next:
+
+  | Interval | Meaning |
+  |---|---|
+  | ~13 µs (`GPIO_MODEM_BIT0_US`) | data bit `0` |
+  | ~23 µs (`GPIO_MODEM_BIT1_US`) | data bit `1` |
+  | ~38 µs (`GPIO_MODEM_SYNC_US`) | frame-start SYNC |
+  | ≥ ~52 µs | inter-frame idle / invalid → resync |
+
+  The decoder classifies each interval into one of these wide bands (~5 µs of slack on every
+  threshold), so ISR jitter has little to bite on. There is **no modem CRC** — the engine's
+  packet CRC16 and the whole-file MD5 do the filtering; a mangled frame is dropped and the
+  carousel re-sends it.
+- **Frame:** `SYNC` then `[len]` and the packet bytes, each byte LSB-first, one interval per
+  bit. `len` is the flipper-share packet length; a bogus length (a noise false-lock) is
+  rejected immediately and the decoder returns to hunting for the next SYNC.
+- **Sender timing:** the frame is bit-banged on a **high-priority thread** from the
+  deterministic DWT cycle counter, with every falling edge pinned to an absolute point on the
+  time grid so jitter cannot accumulate across a frame. It is **not** done inside a critical
+  section, so interrupts (Bluetooth/USB) stay serviced and the system stays healthy; a rare
+  preemption only stretches the one edge it lands on, costing at most one re-sent frame.
+- **Receiver:** a falling-edge EXTI interrupt timestamps each edge and hands the interval to a
+  worker thread, which feeds the decoder and passes completed packets to a separate delivery
+  thread (so the engine's storage I/O never stalls the decode path).
+
+## One-way carousel
+
+The single wire has no return channel, so the engine runs in **carousel** mode
+(`FSH_CAROUSEL`, the same mode the RFID app uses):
+
+- The **sender** broadcasts unconditionally: every `RFID_CAROUSEL_ANNOUNCE_EVERY`-th frame is
+  an ANNOUNCE (file name, size, MD5); the rest walk the file's DATA blocks round-robin.
+- The **receiver** locks to the first ANNOUNCE, preallocates the file, and writes each DATA
+  block once (duplicates ignored). Blocks missed on one pass are picked up on a later pass —
+  the block bitmap converges the transfer without any back-channel. When every block is in, it
+  computes the MD5 and compares it to the announced hash.
 
 ## Timing budget
 
-One DATA transaction is reset+presence (~1 ms) + command (1 B) + length (1 B) + packet (73 B)
-≈ 45 ms, plus the `WIRE_TP_POLL_INTERVAL_MS` gap → ~19 packets/s × 64 payload bytes
-≈ **1.2 KB/s**, which matches the bench.
-
-The slave services each transaction inside interrupt/critical context (~45 ms per DATA
-frame), which is this transport's main systemic constraint. `FSH_DATA_LENGTH` is kept at 64
-for that reason; raising it to 128 is a pure config change once a long transfer is confirmed
-healthy.
+One 64-byte DATA packet is 73 bytes → `(1 + 73) × 8 = 592` bit intervals plus a SYNC, at
+~18 µs average → a ~11 ms frame. With one ANNOUNCE every 4 frames, ~192 payload bytes go out
+per ~41 ms → **~4.5 KB/s** (estimate; `FSH_PAYLOAD_THROUGHPUT_BPS` is replaced with the
+measured rate after a bench run). The sender bit-bangs each frame back-to-back; the transport's
+single-slot outbound mailbox provides the backpressure that paces the engine's carousel loop.
 
 ## Packet structure
 
@@ -117,14 +127,6 @@ depends on the type.
 | `file_size` | 4 bytes  | uint32_t              |
 | `file_hash` | 16 bytes | MD5                   |
 
-### `0x02` — Request range (control payload)
-
-| Field     | Size    | Type     |
-|-----------|---------|----------|
-| `start`   | 4 bytes | uint32_t |
-| `end`     | 4 bytes | uint32_t |
-| padding   | rest    | zero     |
-
 ### `0x03` — Data (data payload)
 
 | Field        | Size            | Type     |
@@ -132,27 +134,24 @@ depends on the type.
 | `block_num`  | 4 bytes         | uint32_t |
 | `block_data` | FSH_DATA_LENGTH | raw data |
 
-## Session
-
-- **Sender** announces the file (name, size, MD5) until a receiver locks on, then serves the
-  requested DATA blocks in its POLL responses.
-- **Receiver** locks to the first valid announce (`tx_id`), preallocates the file, and
-  re-requests the missing block range on timeout. It writes each block once (duplicates
-  ignored) and, when all blocks are in, computes the MD5 and compares it to the announced hash.
-- Lost or corrupted packets are simply re-requested, so the transfer converges.
+(The `0x02` Request packet exists in the engine but is unused here — the carousel receiver
+never transmits.)
 
 ## Files
 
 - `share.c` / `share.h` — shared file-transfer engine (byte-identical across the new Flipper
-  Share apps).
-- `wire_transport.c/.h` — 1-Wire glue: the host worker loop, the slave callbacks, the outbound
-  mailbox and the RX worker.
-- `share_config.h` — all tunables (bus pin, command codes, poll/reconnect timings, packet size,
-  throughput estimate).
+  Share apps; the carousel path is behind `#ifdef FSH_CAROUSEL`).
+- `gpio_modem.c/.h`, `gpio_modem_config.h` — the pulse-distance modem: pure C, no firmware
+  dependencies, so it round-trips on the host test harness.
+- `tools/modem_test.c` — host test harness (`cc … modem_test.c gpio_modem.c`), 4078 checks.
+- `gpio_transport.c/.h` — hardware glue: the sender bit-bang worker, the receiver EXTI capture
+  and the decode/delivery workers.
+- `share_config.h` — all tunables (bus pin, carousel cadence, mailbox depths, throughput
+  estimate); the modem timings live in `gpio_modem_config.h`.
 - `md5_hash.c/.h` — MD5 for the integrity check.
 - `share_app.c/.h`, `scenes/share_scene_*.c` — app shell and the UI scenes.
 
 # Credits
 
-Derived from Flipper Share. The 1-Wire transport is built on the Flipper firmware `one_wire`
-host/slave API, all through the official external app API.
+Derived from Flipper Share. The pulse-distance modem and one-way GPIO transport are original;
+everything runs through the official external app API, no firmware modification.

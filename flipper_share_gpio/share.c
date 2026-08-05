@@ -965,6 +965,31 @@ void fsh_send_data() {
     g.cb_send_bytes(pkt, n);
 }
 
+#ifdef FSH_CAROUSEL
+// Carousel sender helper: read a specific block and broadcast it as a DATA
+// packet (no request bookkeeping — the carousel walks the file round-robin).
+// Self-contained under the macro so the classic engine is untouched.
+static void fsh_send_data_block(uint32_t block_number) {
+    if (g.mode != FSH_MODE_SENDER || !g.cb_send_bytes || !g.cb_read_block) return;
+
+    uint8_t data52[FSH_DATA_LENGTH];
+    (void)g.cb_read_block(block_number, data52); // fills + zero-pads the last block
+
+    if (block_number % 10 == 0) fsh_notify_led_green();
+
+    FSH_pl_data_t pl = {0};
+    pl.block_number = block_number;
+    memcpy(pl.data, data52, FSH_DATA_LENGTH);
+
+    uint8_t payload[FSH_PAYLOAD_MAX];
+    fsh_pl_data_pack(payload, &pl);
+
+    uint8_t pkt[FSH_PACKET_MAX];
+    size_t n = fsh_packet_pack(pkt, FSH_VERSION, g.tx_id, FSH_PKT_DATA, payload);
+    g.cb_send_bytes(pkt, n);
+}
+#endif
+
 // ===== Simple timer/behavior logic =====
 
 void fsh_idle(void) {
@@ -972,6 +997,31 @@ void fsh_idle(void) {
     uint32_t now = g.cb_now_ms();
 
     if (g.mode == FSH_MODE_SENDER) {
+#ifdef FSH_CAROUSEL
+        // Carousel (one-way broadcast): no REQUEST/CONNECTED handling. Every
+        // RFID_CAROUSEL_ANNOUNCE_EVERY-th frame is an ANNOUNCE; all others are the
+        // next DATA block round-robin. One frame per tick — the transport's
+        // blocking send provides the pacing/backpressure.
+        uint32_t total_blocks = (g.s_file_size + FSH_DATA_LENGTH - 1) / FSH_DATA_LENGTH;
+        if (total_blocks == 0) total_blocks = 1; // degenerate empty file
+
+        fsh_lock();
+        bool send_announce = (g.c_frame_counter % RFID_CAROUSEL_ANNOUNCE_EVERY) == 0;
+        g.c_frame_counter++;
+        uint32_t blk = g.c_next_block;
+        if (!send_announce) {
+            g.c_next_block++;
+            if (g.c_next_block >= total_blocks) { g.c_next_block = 0; g.c_loop_count++; }
+            g.c_blocks_sent++;
+        }
+        g.state = FSH_ST_ANNOUNCING; // never leaves ANNOUNCING in carousel
+        g.last_tick_ms = now;
+        fsh_unlock();
+
+        if (send_announce) fsh_send_announce();
+        else fsh_send_data_block(blk); // blocking transport send paces the loop
+        return;
+#else
         // Decide what to do under the lock (last_rx_ms / s_is_blocks_requested are
         // mutated by fsh_handle_request on the RX thread), then act outside it —
         // the radio sends are slow and must not hold the lock.
@@ -1010,6 +1060,7 @@ void fsh_idle(void) {
         if (do_announce) fsh_send_announce();
         if (do_data) fsh_send_data(); // takes the lock internally for bookkeeping
         return;
+#endif // FSH_CAROUSEL
     }
 
     if (g.mode == FSH_MODE_RECEIVER) {
@@ -1020,7 +1071,9 @@ void fsh_idle(void) {
             return;
         }
 
+#ifndef FSH_CAROUSEL
         // --- Decide whether to (re)send a REQUEST for the next missing window ---
+        // Compiled out under carousel: the receiver never transmits (one-way link).
         bool do_request = false;
         uint32_t nbyte_start = 0, nbyte_end = 0;
         if (now - g.last_rx_ms > FSH_RX_TIMEOUT_MS) {
@@ -1042,6 +1095,7 @@ void fsh_idle(void) {
             }
             g.last_rx_ms = now; // debounce timer
         }
+#endif // FSH_CAROUSEL
 
         // --- Detect completion and enter finalization ATOMICALLY ---
         // Setting r_finalizing (and clearing r_locked) under the lock makes
@@ -1067,9 +1121,14 @@ void fsh_idle(void) {
         fsh_unlock();
 
         // --- Slow work OUTSIDE the lock ---
+#ifndef FSH_CAROUSEL
         if (do_request) {
             // Small random backoff to desynchronize periodic re-request bursts.
-            furi_delay_ms(furi_get_tick() % FSH_REQUEST_JITTER_MS);
+            // Read the jitter into a local so a zero value (full-duplex transports
+            // set FSH_REQUEST_JITTER_MS == 0) can never become a compile-time or
+            // runtime modulo-by-zero — the guard skips the delay entirely.
+            uint32_t jitter = FSH_REQUEST_JITTER_MS;
+            if (jitter) furi_delay_ms(furi_get_tick() % jitter);
             fsh_send_request(nbyte_start, nbyte_end);
             fsh_notify_led_cyan();
             // Debounce from send completion (not the decision): the long jitter above
@@ -1079,6 +1138,7 @@ void fsh_idle(void) {
             g.last_rx_ms = g.cb_now_ms ? g.cb_now_ms() : now;
             fsh_unlock();
         }
+#endif // FSH_CAROUSEL
 
         if (do_finalize) {
             // MD5 on a LOCAL handle; r_finalizing keeps the RX thread out of the file.

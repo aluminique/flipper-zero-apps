@@ -73,8 +73,8 @@ static int32_t file_read_worker_thread(void* context) {
         if(finished) {
             state->reading_complete = true;
             // Reception is over (Success or Hash failed): stop hammering the
-            // 1-Wire bus while the result screen waits for the user. Only sets a
-            // flag; the host is fully stopped/freed in on_exit on the scene
+            // GPIO capture while the result screen waits for the user. Only sets a
+            // flag; the receiver is fully stopped/freed in on_exit on the scene
             // thread. Harmless if it kept polling (section 7), but idling the bus
             // is cleaner.
             if(!field_stopped) {
@@ -173,7 +173,8 @@ static void progress_view_draw_callback(Canvas* canvas, void* context) {
             (unsigned int)percent,
             (unsigned long)(fsize / 1024));
     } else {
-        // Clamp in uint64 before casting to guard against overflow.
+        // ETA = remaining / rate: the measured session average once enough has
+        // elapsed, else the nominal FSH_PAYLOAD_THROUGHPUT_BPS (315 B/s measured).
         uint64_t e = (elapsed_ms >= FSH_ETA_WARMUP_MS && recv_bytes > 0)
                          ? ((uint64_t)rem_bytes * elapsed_ms / ((uint64_t)recv_bytes * 1000u))
                          : ((uint64_t)rem_bytes / FSH_PAYLOAD_THROUGHPUT_BPS);
@@ -274,7 +275,7 @@ void share_scene_receive_on_enter(void* context) {
     ShareApp* app = context;
 
     // Create the shared-state lock BEFORE starting the worker thread and the
-    // 1-Wire transport, so both threads see a valid mutex from their first tick.
+    // GPIO transport, so both threads see a valid mutex from their first tick.
     fsh_lock_ensure();
 
     // Create state for the scene
@@ -305,8 +306,8 @@ void share_scene_receive_on_enter(void* context) {
     app->timer = furi_timer_alloc(update_timer_callback, FuriTimerTypePeriodic, app);
     furi_timer_start(app->timer, SCENE_UI_UPDATE_PERIOD_MS);
 
-    // Receiver role: 1-Wire host; drives the bus and the POLL/PUSH loop.
-    gpio_transport_init(GpioTransportModeHost);
+    // Receiver role: listener; captures falling edges and decodes them.
+    gpio_transport_init(GpioTransportModeReceiver);
 }
 
 static void update_timer_callback(void* context) {
@@ -498,7 +499,7 @@ void share_scene_receive_on_exit(void* context) {
         app->timer = NULL;
     }
 
-    // Worker thread is joined in on_event and the 1-Wire transport is stopped above,
+    // Worker thread is joined in on_event and the GPIO transport is stopped above,
     // so no thread touches `g` anymore: free the block map/parts and the
     // shared-state lock.
     fsh_deinit();

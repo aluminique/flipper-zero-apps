@@ -101,8 +101,8 @@ void share_scene_send_on_enter(void* context) {
     app->timer = furi_timer_alloc(update_timer_callback, FuriTimerTypePeriodic, app);
     furi_timer_start(app->timer, SCENE_UI_UPDATE_PERIOD_MS);
 
-    // Sender role: 1-Wire slave (emulator); the receiver drives the bus.
-    gpio_transport_init(GpioTransportModeSlave);
+    // Sender role: one-way broadcaster (carousel); the receiver only listens.
+    gpio_transport_init(GpioTransportModeSender);
 }
 
 // Callback for handling button presses in the dialog
@@ -141,9 +141,10 @@ static void update_timer_callback(void* context) {
             return;
         }
 
-        // Filename on line 1, size on line 2 (bytes if < 1 KB, else KB).
-        // s_file_name/s_file_size are set once in fsh_init and stable, but snapshot
-        // under the lock for consistency; skip this tick on contention.
+        // Filename on line 1, size + rough ETA on line 2. The carousel has no
+        // return channel, so the ETA is the nominal estimate only (file_size /
+        // FSH_PAYLOAD_THROUGHPUT_BPS), like the NFC/IR sender. Snapshot under the
+        // lock; skip this tick on contention.
         char fname[FSH_FILENAME_LENGTH];
         uint32_t fsize;
         if(!fsh_try_lock_ms(20)) return;
@@ -156,13 +157,10 @@ static void update_timer_callback(void* context) {
         // failed) — keep the "Wire pin4-pin4, GND" hint from on_enter.
         if(fsize == 0) return;
 
-        // Rough ETA by the nominal constant only (the sender has no receiver-side
-        // progress). Pure division by a nonzero constant; clamp for a sane display.
         uint32_t eta_sec = fsize / FSH_PAYLOAD_THROUGHPUT_BPS;
         if(eta_sec > FSH_ETA_MAX_SEC) eta_sec = FSH_ETA_MAX_SEC;
         char eta[16];
         fsh_fmt_duration(eta_sec, eta, sizeof(eta));
-
         if(fsize < 1024) {
             snprintf(
                 progress_text, sizeof(progress_text), "%s\n%lu B  ~ %s", fname,
@@ -255,7 +253,7 @@ void share_scene_send_on_exit(void* context) {
         app->timer = NULL;
     }
 
-    // Worker thread is joined in on_event and the 1-Wire transport is stopped above,
+    // Worker thread is joined in on_event and the GPIO transport is stopped above,
     // so free the shared context and the shared-state lock.
     fsh_deinit();
 }

@@ -6,15 +6,16 @@
 ## Overview
 
 **Flipper Share GPIO** transfers any file directly from one Flipper Zero to another over a
-plain **GPIO jumper wire** — no extra hardware, phone, computer, internet or radio needed.
-Jumper pin 4 ↔ pin 4 and GND ↔ GND. The receiver drives the bus as a 1-Wire host; the
-sender answers as a 1-Wire slave.
+plain **GPIO jumper wire** — no extra hardware, no external components, phone, computer,
+internet or radio needed. Jumper pin 4 ↔ pin 4 and GND ↔ GND.
 
-It is the generic-wire sibling of Flipper Share iButton: the same protocol, but the bus is
-an ordinary GPIO (PA4) instead of the iButton pad, so there is no pad pull-up divider and
-the link is more predictable.
+It is a one-way (carousel) link built on a small custom **pulse-distance modem**: the line
+idles high, the sender marks each bit boundary with a short LOW tick (a fast falling edge) and
+encodes the bit in the fall-to-fall interval, like an NEC IR remote. Only falling edges are
+timed, so the slow open-drain rise (internal pull-up, no external resistor) never matters. The
+sender broadcasts announce+blocks round-robin; the receiver's block bitmap fills in over passes.
 
-Actual transfer speed is around **1.2 KB/s** (bench-measured; e.g. 8 KB in ~7 s).
+Transfer speed is roughly **4–5 KB/s** from the timing budget (bench measurement pending).
 
 Other Flipper Share transports (Sub-GHz, IR, NFC & more): [github.com/lomalkin/flipper-zero-apps](https://github.com/lomalkin/flipper-zero-apps)
 
@@ -24,20 +25,19 @@ Features:
   ground wire.
 - Integrity check with an MD5 hash after reception; per-packet CRC16.
 - Resumes automatically: unplug and reconnect the wire mid-transfer and the receiver's block
-  bitmap picks up where it left off.
+  bitmap picks up the missing blocks on a later pass.
 - Torrent-like progress bar on the receiver; filename/size and ETA on the sender.
 
-A brief wire interruption is harmless — every transaction starts with a 1-Wire
-reset/presence pulse, so the link resynchronizes by itself. Received files are saved to
-**/ext/inbox/**.
+A brief wire interruption is harmless — the receiver resumes on the next carousel pass.
+Received files are saved to **/ext/inbox/**.
 
 # Notes
 
-See the full [README.md](https://github.com/lomalkin/flipper-zero-apps/blob/-/flipper_share_gpio/README.md) for the 1-Wire transport and protocol description.
+See the full [README.md](https://github.com/lomalkin/flipper-zero-apps/blob/-/flipper_share_gpio/README.md) for the pulse-distance modem and protocol description.
 
 Source code of the latest version is [here](https://github.com/lomalkin/flipper-zero-apps/blob/-/flipper_share_gpio). Please feel free to open issues and PRs.
 
 # Credits
 
-Derived from Flipper Share. The 1-Wire transport is built on the Flipper firmware
-`one_wire` host/slave API, all through the official external app API.
+Derived from Flipper Share. The pulse-distance modem and one-way GPIO transport are original,
+all through the official external app API.

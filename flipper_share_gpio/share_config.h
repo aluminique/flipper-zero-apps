@@ -1,6 +1,6 @@
 #pragma once
 
-// Per-app tunables for Flipper Share over a GPIO 1-Wire link. This is the
+// Per-app tunables for Flipper Share over a one-way GPIO pulse link. This is the
 // single place to tweak the transport and the transport-dependent engine knobs;
 // changing anything here requires a recompile. The engine (share.c/share.h) and
 // the shared scenes read these but define none of them, so the engine files
@@ -11,69 +11,79 @@
 // Name of this transport, substituted into every UI string ("Send via ...").
 #define FSH_TRANSPORT_NAME "GPIO"
 
-// File-data bytes per DATA packet. A 73-byte DATA packet is ~45 ms of bus time
-// that the sender bit-bangs inside an interrupt/critical section (see README
-// section 5.4), so keep this at 64 until the bench confirms the UI, input and
-// BT stack stay healthy during a long transfer; 128 is a pure config change.
+// Enables the one-way broadcast "carousel" engine mode. The single GPIO wire has
+// no return channel, so the sender broadcasts announce+blocks round-robin and the
+// receiver's block bitmap fills in over passes (same mode the RFID app uses). The
+// #ifdef FSH_CAROUSEL blocks in share.c compile out in the other new apps, so the
+// engine file stays byte-identical across them.
+#define FSH_CAROUSEL
+
+// File-data bytes per DATA packet. 64 -> a 73-byte packet -> a ~11 ms modem frame
+// that the sender bit-bangs at high priority (see gpio_transport.c). Frame-error
+// rate rises with length; raise to 128 only after the bench shows low loss.
 #define FSH_DATA_LENGTH 64u
 
-// Sender announce cadence: fast while discovering, slower while serving a peer.
-// Discovery is polled: the host reads the slave's latest-wins control slot every
-// few ms, so it only sees an ANNOUNCE right after the sender refreshes the slot.
-// Keep that refresh frequent (was 1000 ms, which made the receiver wait ~20 s for
-// one clean 61-byte ANNOUNCE transaction to land) so a lock happens in a couple
-// of seconds. Once a REQUEST arrives the sender switches to the CONNECTED rate.
-#define FSH_ANNOUNCE_INTERVAL_MS 300u   // idle sender discovery interval
-#define FSH_ANNOUNCE_CONNECTED_MS 3000u // announce interval while serving a transfer
+// Announce cadence (compiled out under carousel -- the sender streams uncondition-
+// ally and interleaves ANNOUNCEs via GPIO_CAROUSEL_ANNOUNCE_EVERY). Kept nominal.
+#define FSH_ANNOUNCE_INTERVAL_MS 1000u
+#define FSH_ANNOUNCE_CONNECTED_MS 3000u
 
-// Receiver re-request timeout and sender post-RX gap before streaming DATA.
-#define FSH_RX_TIMEOUT_MS 500u          // receiver REQUEST retry timeout
-#define FSH_TX_TIMEOUT_MS 50u           // sender gap after last RX before streaming
-
-// Engine tick period (the mailbox backpressure, not this, paces the stream) and
-// how long the sender stays CONNECTED after the last RX before re-announcing.
-#define FSH_IDLE_TICK_MS 20u
+// Receiver re-request timeout and CONNECTED-idle revert (both compiled out under
+// carousel -- the receiver never transmits). Kept nominal.
+#define FSH_RX_TIMEOUT_MS 500u
 #define FSH_CONNECTED_IDLE_MS 5000u
 
-// Small random backoff before each (re)REQUEST. The host drives the clock, so
-// collisions are impossible; this only desynchronizes periodic retry bursts.
-#define FSH_REQUEST_JITTER_MS 50u
+// Sender streams unconditionally (no post-RX gap in carousel).
+#define FSH_TX_TIMEOUT_MS 0u
+
+// Engine tick period. Pacing comes from the transport's blocking send, not this.
+#define FSH_IDLE_TICK_MS 20u
+
+// Receiver never transmits, so there is nothing to desynchronize.
+#define FSH_REQUEST_JITTER_MS 0u
 
 // Nominal payload throughput used for the ETA estimate before the measured
-// session rate is available. REPLACE with the measured value after the bench.
-#define FSH_PAYLOAD_THROUGHPUT_BPS 1200u
+// session rate is available (the engine switches to the live rate a few seconds
+// into a transfer). ESTIMATE from the modem timing budget (~11 ms per 64-byte
+// DATA frame, one ANNOUNCE every 4 frames); REPLACE with the measured value once
+// an overdrive-free carousel transfer has been timed on the bench.
+#define FSH_PAYLOAD_THROUGHPUT_BPS 4500u
 
-// No new block for this long -> the receiver GUI shows "stalled".
-#define FSH_STALL_MS 5000u
+// No new block for this long -> the receiver GUI shows "stalled". Must comfortably
+// exceed one carousel cycle so a block that only comes back next pass is not
+// mistaken for a stall.
+#define FSH_STALL_MS 15000u
 
-// ===== 1-Wire transport internals (consumed by gpio_transport.c) ==========
+// ===== Carousel / GPIO transport internals ===================================
+
+// One ANNOUNCE per this many carousel frames. The receiver can only lock on an
+// ANNOUNCE; sending one every 4 frames keeps the initial lock latency to a couple
+// of seconds (25% overhead) while the rest of the stream is DATA. Once locked the
+// receiver only needs DATA, so this only bounds lock / re-lock latency. Named
+// GPIO_CAROUSEL_ANNOUNCE_EVERY? No -- the shared engine hardcodes the RFID name;
+// define it here so share.c stays byte-identical with the RFID app.
+#define RFID_CAROUSEL_ANNOUNCE_EVERY 4u
 
 // Bus pin. PA4 = GPIO header pin 4, a plain GPIO with no on-board analog
-// circuitry, bussed with one jumper wire (pin 4 <-> pin 4) plus GND.
+// circuitry, bussed with one jumper wire (pin 4 <-> pin 4) plus GND. The line
+// idles high: the receiver enables its internal pull-up and the sender drives it
+// open-drain (pulls low for ticks, releases to the pull-up).
 //
-// Why not the iButton pad (PB14 / pin 17): each pad carries a hard 1 kOhm
-// pull-up to its own 5 V rail (only powered from USB/OTG), so two connected pads
-// form an unpredictable divider against whichever rail is up — phantom or
-// missing presence pulses. Why not the spec's suggested PA7 (pin 2): the slave
-// emulator needs an EXTI interrupt, and EXTI is shared by pin NUMBER across all
-// ports — pin 7's line is already taken by the expansion service (USART1 RX),
-// so onewire_slave_start() furi_check-fails there. PA4's EXTI line (4) is free
-// (it is otherwise only the external-SPI chip-select, inactive here) and the
-// host supplies the bus pull-up with the STM32 internal resistor.
+// Why not the iButton pad (PB14 / pin 17): each pad carries a hard 1 kOhm pull-up
+// to its own 5 V rail (only powered from USB/OTG), so two connected pads form an
+// unpredictable divider. Why PA4 specifically: the receiver needs an EXTI line for
+// the falling-edge capture, and EXTI is shared by pin NUMBER across all ports --
+// pin 7's line is taken by the expansion service (USART1 RX), while PA4's line (4)
+// is free (otherwise only the inactive external-SPI chip-select).
 #define GPIO_TP_GPIO (&gpio_ext_pa4)
 
-// Custom link-layer command bytes. Deliberately outside every standard 1-Wire
-// ROM command (0x33 READ ROM, 0xCC SKIP ROM, 0xF0 SEARCH ROM, ...) so a foreign
-// 1-Wire master touching the sender does nothing.
-#define GPIO_TP_CMD_POLL 0xA1 // slave -> host: len(1) + len packet bytes (len 0 = nothing queued)
-#define GPIO_TP_CMD_PUSH 0xA2 // host -> slave: len(1) + len packet bytes
+// Sender single-slot mailbox: how long fsh_transport_send() blocks while the
+// bit-bang worker is still emitting the previous frame (the backpressure that
+// paces the carousel). A timeout drop is harmless -- the carousel re-sends.
+#define GPIO_TP_SEND_TIMEOUT_MS 1000u
 
-// Host pacing: gap between transactions, and retry period while no presence.
-#define GPIO_TP_POLL_INTERVAL_MS 5u
-#define GPIO_TP_RECONNECT_MS 250u
-
-// Outbound DATA mailbox: how long fsh_transport_send() blocks when it is full
-// (this backpressure paces the sender's block stream) and the mailbox / RX
-// queue depth.
-#define GPIO_TP_SEND_TIMEOUT_MS 500u
-#define GPIO_TP_QUEUE_DEPTH 4u
+// Receiver interval-stream depth (in uint32_t intervals) and delivery-queue depth
+// (in packets). The stream is sized to hold several frames' worth of falling-edge
+// intervals so a scheduling hiccup in the rx worker cannot overflow it mid-frame.
+#define GPIO_TP_RX_STREAM_LEN 2048u
+#define GPIO_TP_DELIVER_DEPTH 8u

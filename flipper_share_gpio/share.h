@@ -134,6 +134,16 @@ typedef struct {
     // Callback for writing a received block data by number to real storage.
     // The buffer is always FSH_DATA_LENGTH bytes; must write only valid_len of them.
     void (*cb_write_block)(uint32_t block_number, const uint8_t in[FSH_DATA_LENGTH], uint32_t valid_len);
+
+#ifdef FSH_CAROUSEL
+    // Carousel-mode sender state (one-way broadcast; see the RFID app README §5).
+    // Compiled in only where FSH_CAROUSEL is defined; the field is absent from the
+    // other new apps' identical engine copy, where the macro is undefined.
+    uint32_t c_next_block;      // round-robin DATA cursor (0..total_blocks-1)
+    uint32_t c_frame_counter;   // frames emitted this session (ANNOUNCE interleave)
+    uint32_t c_blocks_sent;     // total DATA frames sent (for the send-scene UI)
+    uint32_t c_loop_count;      // completed passes over the whole file (for the UI)
+#endif
 } fsh_ctx_t;
 
 extern fsh_ctx_t g;      // extern to be available in GUI
