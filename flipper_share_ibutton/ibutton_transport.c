@@ -51,11 +51,6 @@ typedef struct {
 
     volatile bool worker_stop;
     volatile bool dormant; // host: pause polling after the transfer finishes
-
-    // Host-side diagnostics (temporary): resets that saw a presence pulse, and
-    // packets read with a valid length. Surfaced on the receive "waiting" screen.
-    volatile uint32_t dbg_present;
-    volatile uint32_t dbg_pkts;
 } IbtnTransport;
 
 // Owned by the scene lifecycle: init in on_enter, deinit in on_exit, and no
@@ -228,7 +223,6 @@ static int32_t ibtn_tp_host_worker_thread(void* context) {
         FURI_CRITICAL_EXIT();
 
         bool present = ibtn_tp_host_reset_atomic(tp->host);
-        if(present) tp->dbg_present++;
 
         if(present && have_ctrl) {
             IbtnTpPacket ctrl;
@@ -252,7 +246,6 @@ static int32_t ibtn_tp_host_worker_thread(void* context) {
             // reset resynchronizes.
             if(len >= 1 && len <= FSH_PACKET_MAX) {
                 ibtn_tp_host_read_bytes_atomic(tp->host, buf, len);
-                tp->dbg_pkts++;
                 fsh_receive_callback(buf, len);
             }
         }
@@ -361,13 +354,6 @@ void ibutton_transport_deinit(void) {
     if(tp->tx_queue) furi_message_queue_free(tp->tx_queue);
     free(tp);
     FURI_LOG_I(TAG, "stopped");
-}
-
-void ibutton_transport_host_stats(uint32_t* present, uint32_t* pkts) {
-    IbtnTransport* tp = ibtn_tp;
-    bool h = tp && tp->mode == IbtnTransportModeHost;
-    if(present) *present = h ? tp->dbg_present : 0;
-    if(pkts) *pkts = h ? tp->dbg_pkts : 0;
 }
 
 void ibutton_transport_stop_field(void) {
