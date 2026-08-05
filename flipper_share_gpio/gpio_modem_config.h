@@ -19,21 +19,28 @@
 // line to be unambiguously low, short compared to the smallest gap.
 #define GPIO_MODEM_TICK_US 3u
 
-// Nominal fall-to-fall periods the encoder emits.
-#define GPIO_MODEM_BIT0_US 13u // short period  -> data bit 0
-#define GPIO_MODEM_BIT1_US 23u // long period   -> data bit 1
-#define GPIO_MODEM_SYNC_US 38u // sync period   -> frame start marker
-#define GPIO_MODEM_IDLE_US 70u // inter-frame idle the sender holds high between frames
+// Nominal fall-to-fall periods the encoder emits. These are deliberately WIDE:
+// the receiver timestamps each falling edge in a software EXTI ISR, so a
+// higher-priority interrupt (USB especially, on a plugged-in receiver) delays
+// the timestamp and shifts the measured interval by several microseconds. Bands
+// spaced ~20 us apart give ~10 us of slack on each threshold, so that jitter no
+// longer flips a bit. (Full immunity would need a hardware timer input-capture,
+// which PA4 cannot drive -- see share_config.h.) Slower but far fewer dropped
+// frames -> fewer carousel re-passes -> higher *effective* throughput.
+#define GPIO_MODEM_BIT0_US 16u // short period  -> data bit 0
+#define GPIO_MODEM_BIT1_US 38u // long period   -> data bit 1
+#define GPIO_MODEM_SYNC_US 66u // sync period   -> frame start marker
+#define GPIO_MODEM_IDLE_US 130u // inter-frame idle the sender holds high between frames
 
 // Decoder classification thresholds on the measured fall-to-fall period. The
 // bands are [TMIN,T01)=bit0, [T01,T1S)=bit1, [T1S,TSI)=sync, everything else
 // (glitch below TMIN, or idle/garbage at/above TSI) -> resync. Each threshold
-// sits midway between two nominal periods, so there is ~5 us of slack on every
+// sits midway between two nominal periods, so there is ~10 us of slack on every
 // side against ISR jitter.
 #define GPIO_MODEM_TMIN_US 6u // below this: runt glitch -> resync
-#define GPIO_MODEM_T01_US 18u // bit0 | bit1 split   (between BIT0 and BIT1)
-#define GPIO_MODEM_T1S_US 30u // bit1 | sync split   (between BIT1 and SYNC)
-#define GPIO_MODEM_TSI_US 52u // sync | idle split   (between SYNC and IDLE)
+#define GPIO_MODEM_T01_US 27u // bit0 | bit1 split   (between BIT0 and BIT1)
+#define GPIO_MODEM_T1S_US 52u // bit1 | sync split   (between BIT1 and SYNC)
+#define GPIO_MODEM_TSI_US 95u // sync | idle split   (between SYNC and IDLE)
 
 // Hard cap on a packet the modem will carry. Kept just above the largest real
 // flipper-share packet (a 64-byte DATA packet is 73 bytes) rather than the full

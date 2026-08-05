@@ -254,6 +254,7 @@ int main(void) {
     test_roundtrip_all_lengths();
     test_jitter(0);
     test_jitter(4);
+    test_jitter(9); // near the ~10 us band slack -- USB-scale ISR jitter
     test_back_to_back();
     test_garbage_prefix();
     test_dropped_edge_resync();

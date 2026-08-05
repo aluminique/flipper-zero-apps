@@ -44,10 +44,10 @@
 
 // Nominal payload throughput used for the ETA estimate before the measured
 // session rate is available (the engine switches to the live rate a few seconds
-// into a transfer). ESTIMATE from the modem timing budget (~11 ms per 64-byte
-// DATA frame, one ANNOUNCE every 4 frames); REPLACE with the measured value once
-// an overdrive-free carousel transfer has been timed on the bench.
-#define FSH_PAYLOAD_THROUGHPUT_BPS 4500u
+// into a transfer). Bench: ~2700 B/s effective at the earlier tight timing with
+// USB-induced frame loss; the wider bands below trade a little raw rate for far
+// less loss. Left conservative; REPLACE with the re-measured value.
+#define FSH_PAYLOAD_THROUGHPUT_BPS 3000u
 
 // No new block for this long -> the receiver GUI shows "stalled". Must comfortably
 // exceed one carousel cycle so a block that only comes back next pass is not
@@ -57,12 +57,13 @@
 // ===== Carousel / GPIO transport internals ===================================
 
 // One ANNOUNCE per this many carousel frames. The receiver can only lock on an
-// ANNOUNCE; sending one every 4 frames keeps the initial lock latency to a couple
-// of seconds (25% overhead) while the rest of the stream is DATA. Once locked the
-// receiver only needs DATA, so this only bounds lock / re-lock latency. Named
-// GPIO_CAROUSEL_ANNOUNCE_EVERY? No -- the shared engine hardcodes the RFID name;
-// define it here so share.c stays byte-identical with the RFID app.
-#define RFID_CAROUSEL_ANNOUNCE_EVERY 4u
+// ANNOUNCE, but on this clean wire an ANNOUNCE decodes reliably, so it does not
+// need to be frequent -- one every 8 frames still locks within a couple of
+// seconds while cutting the steady-state overhead to ~12% (vs 25% at 4), which
+// goes straight into DATA throughput. Only bounds initial-lock / re-lock latency.
+// Named GPIO_CAROUSEL_ANNOUNCE_EVERY? No -- the shared engine hardcodes the RFID
+// name; define it here so share.c stays byte-identical with the RFID app.
+#define RFID_CAROUSEL_ANNOUNCE_EVERY 8u
 
 // Bus pin. PA4 = GPIO header pin 4, a plain GPIO with no on-board analog
 // circuitry, bussed with one jumper wire (pin 4 <-> pin 4) plus GND. The line
