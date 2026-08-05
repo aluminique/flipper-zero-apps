@@ -15,10 +15,7 @@ bus is an ordinary GPIO (PA4) instead of the iButton pad. On a plain GPIO there 
 pull-up divider to fight, so the link is more predictable — the host just drives the pull-up
 from the STM32's internal resistor.
 
-The link runs 1-Wire in **overdrive** (~10 µs/bit) over the short jumper, for an expected
-**~8–10 KB/s** from the timing budget (the standard-speed fallback is ~1.2 KB/s). This is
-free to do here because the wire is a clean point-to-point link between two devices we
-control on both ends — see the protocol section for why that keeps timing safe.
+Actual transfer speed is around **1.2 KB/s** (bench-measured; e.g. 8 KB in ~7 s).
 
 Other Flipper Share transports (Sub-GHz, IR, NFC & more): [github.com/lomalkin/flipper-zero-apps](https://github.com/lomalkin/flipper-zero-apps)
 
@@ -57,20 +54,10 @@ to the other Flipper Share builds; only the transport differs.
 
 ## Physical / link layer — the 1-Wire transport
 
-- **Bus:** **overdrive** 1-Wire on `gpio_ext_pa4` (PA4 — header pin 4). One overdrive slot
-  ≈ 10 µs/bit → ~0.08 ms/byte (vs ~73 µs/bit at standard speed). PA4 is a plain GPIO with a
-  free EXTI line (needed by the slave emulator) and no on-board analog circuitry, so it is a
-  clean point-to-point bus.
-- **Why overdrive is safe here:** overdrive is normally timing-marginal because its ~2–3 µs
-  sample windows leave no slack for jitter. Both sides remove that jitter: the host wraps
-  each byte in a `FURI_CRITICAL` section and the slave runs its whole transaction inside the
-  EXTI critical section, so every bit slot is bit-banged from the deterministic DWT cycle
-  counter. The two Flippers' clocks are independent, but a slot is only ~10 µs, so drift
-  across one is negligible. No Overdrive-Skip-ROM handshake is needed — the slave mirrors the
-  speed from the host's reset (a short reset ⇒ overdrive) in its reset callback, so both come
-  up in overdrive on the first transaction. As a bonus, overdrive shrinks the slave's
-  interrupts-off window from ~45 ms to ~6 ms per DATA frame, which is *healthier* for the BT
-  and USB stacks than standard speed.
+- **Bus:** standard-speed 1-Wire on `gpio_ext_pa4` (PA4 — header pin 4). One slot ≈ 73 µs/bit
+  → ~0.6 ms/byte. PA4 is a plain GPIO with a free EXTI line (needed by the slave emulator)
+  and no on-board analog circuitry, so it is a clean point-to-point bus. Overdrive mode is
+  not used: the slave side is a software bit-banger in a critical section.
 - **Role mapping:** the **receiver** is the 1-Wire **host** — it drives the bus and owns all
   timing; the **sender** is the 1-Wire **slave** (emulator) and answers in read slots. This
   matches the other transports, where the sender is the passive side (NFC listener, RFID tag).
@@ -108,17 +95,14 @@ to the other Flipper Share builds; only the transport differs.
 
 ## Timing budget
 
-One overdrive DATA transaction is reset+presence (~0.12 ms) + command (1 B) + length (1 B) +
-packet (73 B) at ~0.08 ms/byte ≈ 6 ms, plus the ~1 ms `WIRE_TP_POLL_ACTIVE_MS` gap while a
-transfer is flowing → ~140 packets/s × 64 payload bytes ≈ **~9 KB/s** (standard speed would
-be ~45 ms/transaction ≈ 1.2 KB/s). The host paces adaptively: the short active gap runs
-overdrive frames nearly back-to-back, while an idle link falls back to the longer
-`WIRE_TP_POLL_INTERVAL_MS` so it does not spin the CPU.
+One DATA transaction is reset+presence (~1 ms) + command (1 B) + length (1 B) + packet (73 B)
+≈ 45 ms, plus the `WIRE_TP_POLL_INTERVAL_MS` gap → ~19 packets/s × 64 payload bytes
+≈ **1.2 KB/s**, which matches the bench.
 
-`FSH_DATA_LENGTH` is kept at 64: the slave services each transaction inside interrupt/critical
-context, and at overdrive that is ~6 ms per DATA frame (down from ~45 ms at standard speed).
-Raising it to 128 is a pure config change if a larger frame is wanted once a long transfer is
-confirmed healthy.
+The slave services each transaction inside interrupt/critical context (~45 ms per DATA
+frame), which is this transport's main systemic constraint. `FSH_DATA_LENGTH` is kept at 64
+for that reason; raising it to 128 is a pure config change once a long transfer is confirmed
+healthy.
 
 ## Packet structure
 

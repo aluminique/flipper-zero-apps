@@ -14,8 +14,7 @@ It is the generic-wire sibling of Flipper Share iButton: the same protocol, but 
 an ordinary GPIO (PA4) instead of the iButton pad, so there is no pad pull-up divider and
 the link is more predictable.
 
-The link runs 1-Wire in **overdrive** over the short jumper, for an expected **~8–10 KB/s**
-from the timing budget (standard-speed fallback ~1.2 KB/s).
+Actual transfer speed is around **1.2 KB/s** (bench-measured; e.g. 8 KB in ~7 s).
 
 Other Flipper Share transports (Sub-GHz, IR, NFC & more): [github.com/lomalkin/flipper-zero-apps](https://github.com/lomalkin/flipper-zero-apps)
 

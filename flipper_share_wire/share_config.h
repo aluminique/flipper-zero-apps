@@ -40,10 +40,7 @@
 #define FSH_REQUEST_JITTER_MS 50u
 
 // Nominal payload throughput used for the ETA estimate before the measured
-// session rate is available (the engine switches to the live rate a few seconds
-// into a transfer). Overdrive should raise this well above the standard-speed
-// ~1.2 KB/s; left conservative until an overdrive transfer is timed on the
-// bench, then REPLACE with the measured value.
+// session rate is available. REPLACE with the measured value after the bench.
 #define FSH_PAYLOAD_THROUGHPUT_BPS 1200u
 
 // No new block for this long -> the receiver GUI shows "stalled".
@@ -71,13 +68,7 @@
 #define WIRE_TP_CMD_POLL 0xA1 // slave -> host: len(1) + len packet bytes (len 0 = nothing queued)
 #define WIRE_TP_CMD_PUSH 0xA2 // host -> slave: len(1) + len packet bytes
 
-// Host pacing between transactions (adaptive): POLL_ACTIVE while a transfer is
-// flowing (a packet just came back or a REQUEST was pushed) so overdrive frames
-// run nearly back-to-back; POLL_INTERVAL when the slave has nothing queued so an
-// idle link does not spin the CPU; RECONNECT while no presence is seen. Keep
-// POLL_ACTIVE at >=1 ms: it still yields a scheduler tick to the GUI/USB between
-// transactions, so throughput rises without starving the rest of the system.
-#define WIRE_TP_POLL_ACTIVE_MS 1u
+// Host pacing: gap between transactions, and retry period while no presence.
 #define WIRE_TP_POLL_INTERVAL_MS 5u
 #define WIRE_TP_RECONNECT_MS 250u
 
