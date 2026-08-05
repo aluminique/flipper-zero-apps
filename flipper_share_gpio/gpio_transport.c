@@ -160,7 +160,14 @@ static void gpio_tp_capture_start(GpioTransport* tp) {
     LL_TIM_IC_SetPrescaler(GPIO_TP_CAP_TIM, LL_TIM_CHANNEL_CH1, LL_TIM_ICPSC_DIV1);
     LL_TIM_IC_SetPolarity(GPIO_TP_CAP_TIM, LL_TIM_CHANNEL_CH1, LL_TIM_IC_POLARITY_FALLING);
     LL_TIM_IC_SetFilter(GPIO_TP_CAP_TIM, LL_TIM_CHANNEL_CH1, LL_TIM_IC_FILTER_FDIV1);
-    furi_hal_interrupt_set_isr(GPIO_TP_CAP_IRQ, gpio_tp_capture_isr, tp);
+    // Run the capture ISR ABOVE the USB interrupt (which is Normal priority): the
+    // ISR is tiny (read CCR1, push to the stream buffer), and if USB enumeration
+    // could delay it past a whole bit period the capture would over-run and merge
+    // two edges into one wrong interval -- exactly the corruption burst seen for a
+    // few seconds after a cable is plugged into the receiver. Higher still permits
+    // the ISR-safe furi_stream_buffer_send (only KamiSama forbids OS primitives).
+    furi_hal_interrupt_set_isr_ex(
+        GPIO_TP_CAP_IRQ, FuriHalInterruptPriorityHigher, gpio_tp_capture_isr, tp);
     LL_TIM_ClearFlag_CC1(GPIO_TP_CAP_TIM);
     LL_TIM_EnableIT_CC1(GPIO_TP_CAP_TIM);
     LL_TIM_CC_EnableChannel(GPIO_TP_CAP_TIM, LL_TIM_CHANNEL_CH1);
