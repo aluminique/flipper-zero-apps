@@ -3,7 +3,8 @@ v0.1: EXPERIMENTAL: Flipper Share Wire — file transfer over a GPIO 1-Wire link
 - Generic-wire sibling of Flipper Share iButton: same protocol, but the bus is an ordinary GPIO instead of the iButton pad, so there is no pad pull-up divider and the host supplies the pull-up from the STM32 internal resistor.
 - Role mapping: the receiver drives the bus as the 1-Wire host, the sender answers as a slave (emulator); two custom commands (POLL `0xA1` / PUSH `0xA2`) carry one flipper-share packet per transaction.
 - Deterministic host timing: each reset/read/write runs inside a short critical section, so a busy USB stack cannot stretch a 1-Wire slot and corrupt the byte.
+- Overdrive slots (~10 us/bit vs ~73 us): the slave mirrors the speed from the host's reset (short reset => overdrive) in its reset callback, so both sides come up in overdrive with no Overdrive-Skip-ROM handshake. Both ends bit-bang from the deterministic DWT counter inside critical sections, which keeps overdrive's tight sample windows safe over the short jumper; it also shrinks the slave's interrupts-off window from ~45 ms to ~6 ms per DATA frame.
+- Adaptive host pacing: overdrive frames run nearly back-to-back while a transfer is flowing (WIRE_TP_POLL_ACTIVE_MS), with a longer idle gap so an idle link does not spin the CPU. Expected ~8-10 KB/s from the timing budget (pending a bench measurement; the ETA constant is left at the conservative standard-speed value until then).
 - Resumable: the block bitmap picks up where the wire was interrupted; per-packet CRC16 and a whole-file MD5 check after reception.
 - Control traffic (ANNOUNCE / REQUEST) has priority over DATA in the transport mailbox, so a DATA stream cannot starve it.
 - Custom command codes avoid the standard 1-Wire ROM commands, so a foreign 1-Wire reader touching the sender gets nothing.
-- Standard-speed slots; ~1.2 KB/s on the bench.

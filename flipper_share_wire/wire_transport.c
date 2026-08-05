@@ -104,10 +104,19 @@ static bool wire_tp_pop_outbound_isr(WireTransport* tp, IbtnTpPacket* out) {
     return furi_message_queue_get(tp->tx_queue, out, 0) == FuriStatusOk;
 }
 
-// Participate in normal-speed resets only (no overdrive between two Flippers).
+// Overdrive point-to-point link: mirror the host's reset speed. This callback
+// runs inside the slave's reset critical section, right BEFORE the driver emits
+// the presence pulse (see onewire_slave_receive_and_process_command), so setting
+// the timing mode here takes effect for that presence pulse and all following
+// slots. The host always resets in overdrive (a short reset, is_short==true), so
+// we switch to overdrive timings; a standard-speed reset (long) still falls back
+// to normal so we answer either way. onewire_slave_set_overdrive is a no-op once
+// already in the requested mode (and its internal "settle" wait returns at once
+// because the bus is high here), so steady-state cost is zero. Always present.
 static bool wire_tp_slave_reset_callback(bool is_short, void* context) {
-    UNUSED(context);
-    return !is_short;
+    WireTransport* tp = context;
+    onewire_slave_set_overdrive(tp->slave, is_short);
+    return true;
 }
 
 // 1-Wire interrupt/critical context: no blocking furi calls, no mutexes, no
@@ -221,6 +230,7 @@ static int32_t wire_tp_host_worker_thread(void* context) {
         FURI_CRITICAL_EXIT();
 
         bool present = wire_tp_host_reset_atomic(tp->host);
+        bool productive = false; // a REQUEST was pushed, or a packet came back
 
         if(present && have_ctrl) {
             IbtnTpPacket ctrl;
@@ -236,6 +246,7 @@ static int32_t wire_tp_host_worker_thread(void* context) {
                 wire_tp_host_write_atomic(tp->host, WIRE_TP_CMD_PUSH);
                 wire_tp_host_write_atomic(tp->host, ctrl.len);
                 wire_tp_host_write_bytes_atomic(tp->host, ctrl.data, ctrl.len);
+                productive = true;
             }
         } else if(present) {
             wire_tp_host_write_atomic(tp->host, WIRE_TP_CMD_POLL);
@@ -245,10 +256,20 @@ static int32_t wire_tp_host_worker_thread(void* context) {
             if(len >= 1 && len <= FSH_PACKET_MAX) {
                 wire_tp_host_read_bytes_atomic(tp->host, buf, len);
                 fsh_receive_callback(buf, len);
+                productive = true;
             }
         }
 
-        furi_delay_ms(present ? WIRE_TP_POLL_INTERVAL_MS : WIRE_TP_RECONNECT_MS);
+        // Adaptive pacing: back-to-back while a transfer is flowing (a REQUEST was
+        // just pushed, or a packet came back), a longer idle gap when the slave has
+        // nothing queued, and the reconnect period when the wire is open. The short
+        // active gap is what lets overdrive pay off — otherwise the fixed idle gap
+        // would dominate the now-~6 ms transaction. A 1 ms yield still lets the GUI
+        // and USB stack run between transactions.
+        uint32_t gap = !present  ? WIRE_TP_RECONNECT_MS :
+                       productive ? WIRE_TP_POLL_ACTIVE_MS :
+                                    WIRE_TP_POLL_INTERVAL_MS;
+        furi_delay_ms(gap);
     }
     return 0;
 }
@@ -285,6 +306,15 @@ void wire_transport_init(WireTransportMode mode) {
     } else {
         tp->host = onewire_host_alloc(WIRE_TP_GPIO);
         onewire_host_start(tp->host);
+        // Overdrive slots (~10 us/bit vs ~73 us) on this clean point-to-point
+        // jumper. The slave mirrors the mode from its reset callback, so no
+        // Overdrive-Skip-ROM handshake is needed; the first (short) reset already
+        // brings both sides up in overdrive. Timing stays deterministic because
+        // the host wraps each byte in a critical section and the slave runs its
+        // whole transaction in one; overdrive also shrinks the slave's
+        // interrupts-off window (~45 ms -> ~6 ms per DATA frame). set_overdrive
+        // only swaps the timing table, so pin setup below is unaffected.
+        onewire_host_set_overdrive(tp->host, true);
         // The bus pin (PA4, header pin 4) has no on-board pull-up, and the
         // firmware host driver configures the pin with no pull at all — a
         // floating 1-Wire bus reads phantom presence pulses. Re-init the pin
