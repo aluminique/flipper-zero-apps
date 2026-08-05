@@ -23,6 +23,11 @@
 #define GPIO_TP_CAP_IRQ FuriHalInterruptIdTim1TrgComTim17
 #define GPIO_TP_CAP_AF GpioAltFn14TIM17
 
+// Interval ring between the capture ISR (producer) and the rx worker (consumer).
+// Power of two. ~110 ms of edges of headroom so a worker stall under heavy USB/RPC
+// load (e.g. qFlipper screen-streaming) cannot lose captures.
+#define GPIO_TP_RX_RING_LEN 4096u
+
 typedef struct {
     uint8_t len;
     uint8_t data[FSH_PACKET_MAX];
@@ -42,7 +47,13 @@ typedef struct {
     // I/O never stalls the decode path.
     FuriThread* rx_worker;
     FuriThread* deliver_worker;
-    FuriStreamBuffer* rx_stream; // EXTI ISR -> rx worker (intervals, microseconds)
+    // Lock-free single-producer/single-consumer ring: the KamiSama capture ISR
+    // writes fall-to-fall intervals (microseconds) and publishes rx_head; the rx
+    // worker keeps its own tail. A plain array (no OS primitives) so the ISR can
+    // run at KamiSama priority, above the FreeRTOS syscall ceiling, and never be
+    // masked by a critical section.
+    uint16_t* rx_ring;
+    volatile uint32_t rx_head;
     FuriMessageQueue* deliver_q; // rx worker -> delivery worker
     GpioModemDec dec; // touched only by the rx worker
     volatile uint16_t rx_last_ccr; // capture ISR: TIM17 CCR1 of the previous falling edge
@@ -126,21 +137,24 @@ static int32_t gpio_tp_tx_worker(void* context) {
 
 // ===== Receiver (EXTI + decode) ==============================================
 
-// Timer capture interrupt: TIM17 CH1 latched the falling edge into CCR1 in
-// hardware. Read it (which clears the flag), compute the interval since the
-// previous edge, and hand it (microseconds) to the rx worker. Because CCR1 holds
-// the true edge time, this ISR running late (e.g. behind a USB interrupt) does
-// not distort the interval.
+// Timer capture interrupt (runs at KamiSama priority -- above the FreeRTOS
+// syscall ceiling, so a critical section in the USB/RPC/storage code can never
+// mask it and make it over-run). TIM17 CH1 latched the falling edge into CCR1 in
+// hardware, so even reading it late gives the exact edge time. MUST NOT call any
+// OS primitive here: it writes the interval into a plain lock-free ring and the
+// rx worker drains it.
 static void gpio_tp_capture_isr(void* context) {
     GpioTransport* tp = context;
     if(!LL_TIM_IsActiveFlag_CC1(GPIO_TP_CAP_TIM)) return;
     uint16_t ccr = (uint16_t)LL_TIM_IC_GetCaptureCH1(GPIO_TP_CAP_TIM); // read clears CC1IF
     if(tp->rx_have_last) {
         // 1 us/tick, 16-bit counter: the unsigned subtraction wraps correctly for
-        // any interval up to 65 ms. A missed edge (ISR delayed past a whole period)
-        // just yields a larger interval, which the decoder treats as a resync.
-        uint32_t interval = (uint16_t)(ccr - tp->rx_last_ccr);
-        furi_stream_buffer_send(tp->rx_stream, &interval, sizeof(interval), 0);
+        // any interval up to 65 ms. A missed edge (ISR somehow still late) just
+        // yields a larger interval, which the decoder treats as a resync.
+        uint16_t interval = ccr - tp->rx_last_ccr;
+        uint32_t head = tp->rx_head;
+        tp->rx_ring[head & (GPIO_TP_RX_RING_LEN - 1u)] = interval;
+        tp->rx_head = head + 1u; // publish the sample after the store
     }
     tp->rx_last_ccr = ccr;
     tp->rx_have_last = true;
@@ -160,14 +174,14 @@ static void gpio_tp_capture_start(GpioTransport* tp) {
     LL_TIM_IC_SetPrescaler(GPIO_TP_CAP_TIM, LL_TIM_CHANNEL_CH1, LL_TIM_ICPSC_DIV1);
     LL_TIM_IC_SetPolarity(GPIO_TP_CAP_TIM, LL_TIM_CHANNEL_CH1, LL_TIM_IC_POLARITY_FALLING);
     LL_TIM_IC_SetFilter(GPIO_TP_CAP_TIM, LL_TIM_CHANNEL_CH1, LL_TIM_IC_FILTER_FDIV1);
-    // Run the capture ISR ABOVE the USB interrupt (which is Normal priority): the
-    // ISR is tiny (read CCR1, push to the stream buffer), and if USB enumeration
-    // could delay it past a whole bit period the capture would over-run and merge
-    // two edges into one wrong interval -- exactly the corruption burst seen for a
-    // few seconds after a cable is plugged into the receiver. Higher still permits
-    // the ISR-safe furi_stream_buffer_send (only KamiSama forbids OS primitives).
+    // KamiSama priority: above configMAX_SYSCALL_INTERRUPT_PRIORITY, so a FreeRTOS
+    // critical section anywhere (USB/RPC/storage) cannot mask the capture and make
+    // it over-run. That was the residual failure -- with a plugged-in host running
+    // qFlipper, critical sections in the RPC/USB path delayed a merely-High ISR
+    // past a bit period. The trade-off is the ISR may use no OS primitives, which
+    // is why it writes a plain ring (see gpio_tp_capture_isr).
     furi_hal_interrupt_set_isr_ex(
-        GPIO_TP_CAP_IRQ, FuriHalInterruptPriorityHigher, gpio_tp_capture_isr, tp);
+        GPIO_TP_CAP_IRQ, FuriHalInterruptPriorityKamiSama, gpio_tp_capture_isr, tp);
     LL_TIM_ClearFlag_CC1(GPIO_TP_CAP_TIM);
     LL_TIM_EnableIT_CC1(GPIO_TP_CAP_TIM);
     LL_TIM_CC_EnableChannel(GPIO_TP_CAP_TIM, LL_TIM_CHANNEL_CH1);
@@ -200,14 +214,24 @@ static int32_t gpio_tp_deliver_worker(void* context) {
 static int32_t gpio_tp_rx_worker(void* context) {
     GpioTransport* tp = context;
     uint8_t pkt[FSH_PACKET_MAX];
-    uint32_t batch[64]; // drain many intervals per syscall
+    uint32_t tail = 0;
 
     while(!tp->worker_stop) {
-        size_t got =
-            furi_stream_buffer_receive(tp->rx_stream, batch, sizeof(batch), furi_ms_to_ticks(50));
-        size_t nev = got / sizeof(uint32_t);
-        for(size_t i = 0; i < nev; i++) {
-            size_t len = gpio_modem_dec_feed(&tp->dec, batch[i], pkt, FSH_PACKET_MAX);
+        uint32_t head = tp->rx_head; // snapshot the ISR's publish index
+        if(head == tail) {
+            furi_delay_ms(1); // ring empty -> yield; 1 ms latency is fine for the carousel
+            continue;
+        }
+        // Ring overrun (worker starved longer than the whole ring): skip to the
+        // newest window and resync the decoder rather than replaying stale data.
+        if((uint32_t)(head - tail) > GPIO_TP_RX_RING_LEN) {
+            tail = head - GPIO_TP_RX_RING_LEN;
+            gpio_modem_dec_reset(&tp->dec);
+        }
+        while(tail != head) {
+            uint16_t interval = tp->rx_ring[tail & (GPIO_TP_RX_RING_LEN - 1u)];
+            tail++;
+            size_t len = gpio_modem_dec_feed(&tp->dec, interval, pkt, FSH_PACKET_MAX);
             if(len) {
                 GpioTpPacket p;
                 p.len = (uint8_t)len;
@@ -248,12 +272,15 @@ void gpio_transport_init(GpioTransportMode mode) {
         furi_thread_start(tp->tx_worker);
     } else {
         gpio_modem_dec_reset(&tp->dec);
-        tp->rx_stream =
-            furi_stream_buffer_alloc(sizeof(uint32_t) * GPIO_TP_RX_STREAM_LEN, sizeof(uint32_t));
+        tp->rx_ring = malloc(sizeof(uint16_t) * GPIO_TP_RX_RING_LEN);
+        tp->rx_head = 0;
+        tp->rx_have_last = false;
         tp->deliver_q = furi_message_queue_alloc(GPIO_TP_DELIVER_DEPTH, sizeof(GpioTpPacket));
 
-        tp->deliver_worker =
-            furi_thread_alloc_ex("GpioDeliver", 2048, gpio_tp_deliver_worker, tp);
+        tp->deliver_worker = furi_thread_alloc_ex("GpioDeliver", 2048, gpio_tp_deliver_worker, tp);
+        // High priority so storage writes keep draining the deliver queue even while
+        // a plugged-in host (qFlipper RPC) loads the system.
+        furi_thread_set_priority(tp->deliver_worker, FuriThreadPriorityHigh);
         furi_thread_start(tp->deliver_worker);
         tp->rx_worker = furi_thread_alloc_ex("GpioRxWorker", 2048, gpio_tp_rx_worker, tp);
         furi_thread_set_priority(tp->rx_worker, FuriThreadPriorityHigh);
@@ -293,7 +320,7 @@ void gpio_transport_deinit(void) {
             furi_thread_join(tp->deliver_worker); // then drain deliveries to the engine
             furi_thread_free(tp->deliver_worker);
         }
-        if(tp->rx_stream) furi_stream_buffer_free(tp->rx_stream);
+        if(tp->rx_ring) free(tp->rx_ring);
         if(tp->deliver_q) furi_message_queue_free(tp->deliver_q);
     }
 

@@ -83,8 +83,7 @@
 // paces the carousel). A timeout drop is harmless -- the carousel re-sends.
 #define GPIO_TP_SEND_TIMEOUT_MS 1000u
 
-// Receiver interval-stream depth (in uint32_t intervals) and delivery-queue depth
-// (in packets). The stream is sized to hold several frames' worth of falling-edge
-// intervals so a scheduling hiccup in the rx worker cannot overflow it mid-frame.
-#define GPIO_TP_RX_STREAM_LEN 2048u
-#define GPIO_TP_DELIVER_DEPTH 8u
+// Receiver delivery-queue depth (in packets), between the decode worker and the
+// storage worker. Deep enough to ride out a storage hiccup under host (qFlipper)
+// load. (The capture-interval ring lives in gpio_transport.c, sized there.)
+#define GPIO_TP_DELIVER_DEPTH 16u
