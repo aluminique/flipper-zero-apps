@@ -3,6 +3,8 @@ App(
     name="Flipper Share GPIO",
     apptype=FlipperAppType.EXTERNAL,
     entry_point="share_app",
+    # tools/ holds the host-only modem test harness; keep it out of the FAP.
+    sources=["*.c*", "!tools"],
     stack_size=2 * 1024,
     fap_category="GPIO",
     fap_version="0.1",
