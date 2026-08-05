@@ -7,7 +7,7 @@
 
 **Flipper Share GPIO** transfers any file directly from one Flipper Zero to another over a
 plain **GPIO jumper wire** — no extra hardware, no external components, no phone, computer,
-internet or radio needed. Jumper **pin 4 ↔ pin 4** and **GND ↔ GND**, and the transfer runs.
+internet or radio needed. Jumper **pin 2 ↔ pin 2** and **GND ↔ GND**, and the transfer runs.
 
 It is a one-way (carousel) link built on a small custom **pulse-distance modem**. The line
 idles high; the sender marks every bit boundary with a short LOW "tick" — a fast, actively
@@ -35,7 +35,7 @@ Features:
 
 # Usage
 
-1. Wire **pin 4 ↔ pin 4** and **GND ↔ GND** between the two Flippers (any GND pin).
+1. Wire **pin 2 ↔ pin 2** and **GND ↔ GND** between the two Flippers (any GND pin).
 2. On the receiving Flipper: open Flipper Share GPIO → **Receive via GPIO**.
 3. On the sending Flipper: open Flipper Share GPIO → **Send via GPIO** → pick a file → **OK**.
 4. Hold the connection until it completes. The receiver shows a progress bar and verifies the
@@ -73,15 +73,15 @@ the slow rise only has to finish somewhere inside the following gap — it is ne
 
   | Interval | Meaning |
   |---|---|
-  | ~13 µs (`GPIO_MODEM_BIT0_US`) | data bit `0` |
-  | ~23 µs (`GPIO_MODEM_BIT1_US`) | data bit `1` |
-  | ~38 µs (`GPIO_MODEM_SYNC_US`) | frame-start SYNC |
-  | ≥ ~52 µs | inter-frame idle / invalid → resync |
+  | ~16 µs (`GPIO_MODEM_BIT0_US`) | data bit `0` |
+  | ~38 µs (`GPIO_MODEM_BIT1_US`) | data bit `1` |
+  | ~66 µs (`GPIO_MODEM_SYNC_US`) | frame-start SYNC |
+  | ≥ ~95 µs | inter-frame idle / invalid → resync |
 
-  The decoder classifies each interval into one of these wide bands (~5 µs of slack on every
-  threshold), so ISR jitter has little to bite on. There is **no modem CRC** — the engine's
-  packet CRC16 and the whole-file MD5 do the filtering; a mangled frame is dropped and the
-  carousel re-sends it.
+  The decoder classifies each interval into one of these wide bands (~10 µs of slack on every
+  threshold), so residual timing jitter has little to bite on. There is **no modem CRC** — the
+  engine's packet CRC16 and the whole-file MD5 do the filtering; a mangled frame is dropped and
+  the carousel re-sends it.
 - **Frame:** `SYNC` then `[len]` and the packet bytes, each byte LSB-first, one interval per
   bit. `len` is the flipper-share packet length; a bogus length (a noise false-lock) is
   rejected immediately and the decoder returns to hunting for the next SYNC.
@@ -90,9 +90,13 @@ the slow rise only has to finish somewhere inside the following gap — it is ne
   time grid so jitter cannot accumulate across a frame. It is **not** done inside a critical
   section, so interrupts (Bluetooth/USB) stay serviced and the system stays healthy; a rare
   preemption only stretches the one edge it lands on, costing at most one re-sent frame.
-- **Receiver:** a falling-edge EXTI interrupt timestamps each edge and hands the interval to a
-  worker thread, which feeds the decoder and passes completed packets to a separate delivery
-  thread (so the engine's storage I/O never stalls the decode path).
+- **Receiver:** the wire pin (PA7) is put into a **hardware timer input-capture** channel
+  (TIM17_CH1, 1 µs tick). Each falling edge latches the timer count into `CCR1` *in hardware*,
+  so the capture interrupt reads the exact edge time no matter how late it runs — a USB
+  interrupt delaying the ISR can no longer distort the interval. (A plain software EXTI+DWT
+  timestamp, taken at ISR entry, was the earlier design and lost heavily under USB load.) The
+  ISR hands the interval to a worker thread, which decodes and passes completed packets to a
+  separate delivery thread (so the engine's storage I/O never stalls the decode path).
 
 ## One-way carousel
 
@@ -109,10 +113,14 @@ The single wire has no return channel, so the engine runs in **carousel** mode
 ## Timing budget
 
 One 64-byte DATA packet is 73 bytes → `(1 + 73) × 8 = 592` bit intervals plus a SYNC, at
-~18 µs average → a ~11 ms frame. With one ANNOUNCE every 4 frames, ~192 payload bytes go out
-per ~41 ms → **~4.5 KB/s** (estimate; `FSH_PAYLOAD_THROUGHPUT_BPS` is replaced with the
-measured rate after a bench run). The sender bit-bangs each frame back-to-back; the transport's
-single-slot outbound mailbox provides the backpressure that paces the engine's carousel loop.
+~27 µs average (the widened bands) → a ~16 ms frame. With one ANNOUNCE every 8 frames, ~448
+payload bytes go out per ~125 ms → a few KB/s (`FSH_PAYLOAD_THROUGHPUT_BPS` is replaced with
+the measured rate after a bench run). The sender bit-bangs each frame back-to-back; the
+transport's single-slot outbound mailbox provides the backpressure that paces the carousel.
+
+The bands were widened (and the announce cadence relaxed) to survive timing jitter; with the
+receiver now on hardware capture, they can be tightened again to trade back for speed once the
+bench confirms the capture path is loss-free.
 
 ## Packet structure
 
@@ -144,8 +152,8 @@ never transmits.)
 - `gpio_modem.c/.h`, `gpio_modem_config.h` — the pulse-distance modem: pure C, no firmware
   dependencies, so it round-trips on the host test harness.
 - `tools/modem_test.c` — host test harness (`cc … modem_test.c gpio_modem.c`), 4078 checks.
-- `gpio_transport.c/.h` — hardware glue: the sender bit-bang worker, the receiver EXTI capture
-  and the decode/delivery workers.
+- `gpio_transport.c/.h` — hardware glue: the sender bit-bang worker, the receiver TIM17
+  input-capture ISR, and the decode/delivery workers.
 - `share_config.h` — all tunables (bus pin, carousel cadence, mailbox depths, throughput
   estimate); the modem timings live in `gpio_modem_config.h`.
 - `md5_hash.c/.h` — MD5 for the integrity check.

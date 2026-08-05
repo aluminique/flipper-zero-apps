@@ -65,18 +65,18 @@
 // name; define it here so share.c stays byte-identical with the RFID app.
 #define RFID_CAROUSEL_ANNOUNCE_EVERY 8u
 
-// Bus pin. PA4 = GPIO header pin 4, a plain GPIO with no on-board analog
-// circuitry, bussed with one jumper wire (pin 4 <-> pin 4) plus GND. The line
-// idles high: the receiver enables its internal pull-up and the sender drives it
-// open-drain (pulls low for ticks, releases to the pull-up).
+// Bus pin. PA7 = GPIO header pin 2. One jumper wire (pin 2 <-> pin 2) plus GND.
+// The line idles high: the receiver enables the internal pull-up and the sender
+// drives it open-drain (pulls low for ticks, releases to the pull-up).
 //
-// Why not the iButton pad (PB14 / pin 17): each pad carries a hard 1 kOhm pull-up
-// to its own 5 V rail (only powered from USB/OTG), so two connected pads form an
-// unpredictable divider. Why PA4 specifically: the receiver needs an EXTI line for
-// the falling-edge capture, and EXTI is shared by pin NUMBER across all ports --
-// pin 7's line is taken by the expansion service (USART1 RX), while PA4's line (4)
-// is free (otherwise only the inactive external-SPI chip-select).
-#define GPIO_TP_GPIO (&gpio_ext_pa4)
+// Why PA7 specifically: the receiver reads the falling-edge time from a HARDWARE
+// timer input-capture (TIM17_CH1, AF14 -- see gpio_transport.c) so that USB
+// interrupt latency cannot distort the measured interval; PA7 is the header pin
+// that routes to a free capture-capable timer channel (PA4 has only LPTIM2 PWM
+// out; PA6/TIM16 is the beeper; PB3/TIM2 is the RFID timer). We use the TIM17 IRQ,
+// not EXTI, so the expansion service's historical claim on pin-7's EXTI line does
+// not apply -- but if that service ever fights us here, disable it in Settings.
+#define GPIO_TP_GPIO (&gpio_ext_pa7)
 
 // Sender single-slot mailbox: how long fsh_transport_send() blocks while the
 // bit-bang worker is still emitting the previous frame (the backpressure that

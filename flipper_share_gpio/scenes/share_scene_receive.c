@@ -288,7 +288,7 @@ void share_scene_receive_on_enter(void* context) {
 
     // Setup dialog to show progress (use same UI as send scene so buttons appear)
     dialog_ex_set_header(app->dialog_show_file, "Receiving via " FSH_TRANSPORT_NAME "...", 64, SCENE_HEADER_POSITION_Y, AlignCenter, AlignTop);
-    dialog_ex_set_text(app->dialog_show_file, "Wire pin4-pin4, GND", 64, 32, AlignCenter, AlignCenter);
+    dialog_ex_set_text(app->dialog_show_file, "Wire pin2-pin2, GND", 64, 32, AlignCenter, AlignCenter);
     dialog_ex_set_left_button_text(app->dialog_show_file, "Back");
     dialog_ex_set_right_button_text(app->dialog_show_file, NULL);
 
@@ -389,7 +389,7 @@ static void update_timer_callback(void* context) {
         snprintf(
             progress_text,
             sizeof(progress_text),
-            "Wire pin4-pin4, GND\nWaiting for announce...");
+            "Wire pin2-pin2, GND\nWaiting for announce...");
 
         // If we're no longer locked but the progress view is active, switch back to dialog
         if(progress_view_active) {

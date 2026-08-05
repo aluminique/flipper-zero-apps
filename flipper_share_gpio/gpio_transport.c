@@ -4,10 +4,24 @@
 
 #include <furi.h>
 #include <furi_hal.h> // furi_hal_gpio_*, DWT->CYCCNT, furi_hal_cortex_instructions_per_microsecond
+#include <furi_hal_interrupt.h> // furi_hal_interrupt_set_isr (own the TIM17 capture IRQ)
+#include <furi_hal_bus.h> // furi_hal_bus_enable/disable (TIM17 clock)
+#include <stm32wbxx_ll_tim.h> // LL_TIM_* input-capture configuration
 
 #include "share_config.h" // GPIO_TP_* pin and tunables
 
 #define TAG "GpioTransport"
+
+// Receiver capture peripheral: TIM17 channel 1 on PA7 (AF14), 1 us tick. The
+// falling edge latches CCR1 in HARDWARE, so the capture ISR reads the exact edge
+// time no matter how late it runs -- a USB interrupt delaying the ISR no longer
+// distorts the measured interval, which is what made the software EXTI+DWT
+// timestamp lossy under USB load. TIM17 is otherwise used only by the NFC stack,
+// which is inactive while this app runs.
+#define GPIO_TP_CAP_TIM TIM17
+#define GPIO_TP_CAP_BUS FuriHalBusTIM17
+#define GPIO_TP_CAP_IRQ FuriHalInterruptIdTim1TrgComTim17
+#define GPIO_TP_CAP_AF GpioAltFn14TIM17
 
 typedef struct {
     uint8_t len;
@@ -31,7 +45,7 @@ typedef struct {
     FuriStreamBuffer* rx_stream; // EXTI ISR -> rx worker (intervals, microseconds)
     FuriMessageQueue* deliver_q; // rx worker -> delivery worker
     GpioModemDec dec; // touched only by the rx worker
-    volatile uint32_t rx_last_cyc; // ISR: DWT timestamp of the previous falling edge
+    volatile uint16_t rx_last_ccr; // capture ISR: TIM17 CCR1 of the previous falling edge
     volatile bool rx_have_last;
     volatile bool field_on;
 } GpioTransport;
@@ -112,18 +126,55 @@ static int32_t gpio_tp_tx_worker(void* context) {
 
 // ===== Receiver (EXTI + decode) ==============================================
 
-// Falling-edge interrupt: timestamp the edge and hand the fall-to-fall interval
-// (microseconds) to the rx worker. No decoding here.
-static void gpio_tp_exti_isr(void* context) {
+// Timer capture interrupt: TIM17 CH1 latched the falling edge into CCR1 in
+// hardware. Read it (which clears the flag), compute the interval since the
+// previous edge, and hand it (microseconds) to the rx worker. Because CCR1 holds
+// the true edge time, this ISR running late (e.g. behind a USB interrupt) does
+// not distort the interval.
+static void gpio_tp_capture_isr(void* context) {
     GpioTransport* tp = context;
-    uint32_t now = DWT->CYCCNT;
+    if(!LL_TIM_IsActiveFlag_CC1(GPIO_TP_CAP_TIM)) return;
+    uint16_t ccr = (uint16_t)LL_TIM_IC_GetCaptureCH1(GPIO_TP_CAP_TIM); // read clears CC1IF
     if(tp->rx_have_last) {
-        uint32_t interval =
-            (now - tp->rx_last_cyc) / furi_hal_cortex_instructions_per_microsecond();
+        // 1 us/tick, 16-bit counter: the unsigned subtraction wraps correctly for
+        // any interval up to 65 ms. A missed edge (ISR delayed past a whole period)
+        // just yields a larger interval, which the decoder treats as a resync.
+        uint32_t interval = (uint16_t)(ccr - tp->rx_last_ccr);
         furi_stream_buffer_send(tp->rx_stream, &interval, sizeof(interval), 0);
     }
-    tp->rx_last_cyc = now;
+    tp->rx_last_ccr = ccr;
     tp->rx_have_last = true;
+}
+
+// Configure TIM17 CH1 to capture falling edges on PA7 at a 1 us tick and route
+// its interrupt to gpio_tp_capture_isr. The pin is put in TIM17 AF with a pull-up
+// so the line idles high.
+static void gpio_tp_capture_start(GpioTransport* tp) {
+    tp->rx_have_last = false;
+    furi_hal_bus_enable(GPIO_TP_CAP_BUS);
+    LL_TIM_SetPrescaler(
+        GPIO_TP_CAP_TIM, furi_hal_cortex_instructions_per_microsecond() - 1u); // -> 1 us tick
+    LL_TIM_SetAutoReload(GPIO_TP_CAP_TIM, 0xFFFFu);
+    LL_TIM_SetCounterMode(GPIO_TP_CAP_TIM, LL_TIM_COUNTERMODE_UP);
+    LL_TIM_IC_SetActiveInput(GPIO_TP_CAP_TIM, LL_TIM_CHANNEL_CH1, LL_TIM_ACTIVEINPUT_DIRECTTI);
+    LL_TIM_IC_SetPrescaler(GPIO_TP_CAP_TIM, LL_TIM_CHANNEL_CH1, LL_TIM_ICPSC_DIV1);
+    LL_TIM_IC_SetPolarity(GPIO_TP_CAP_TIM, LL_TIM_CHANNEL_CH1, LL_TIM_IC_POLARITY_FALLING);
+    LL_TIM_IC_SetFilter(GPIO_TP_CAP_TIM, LL_TIM_CHANNEL_CH1, LL_TIM_IC_FILTER_FDIV1);
+    furi_hal_interrupt_set_isr(GPIO_TP_CAP_IRQ, gpio_tp_capture_isr, tp);
+    LL_TIM_ClearFlag_CC1(GPIO_TP_CAP_TIM);
+    LL_TIM_EnableIT_CC1(GPIO_TP_CAP_TIM);
+    LL_TIM_CC_EnableChannel(GPIO_TP_CAP_TIM, LL_TIM_CHANNEL_CH1);
+    LL_TIM_EnableCounter(GPIO_TP_CAP_TIM);
+    furi_hal_gpio_init_ex(
+        GPIO_TP_GPIO, GpioModeAltFunctionPushPull, GpioPullUp, GpioSpeedLow, GPIO_TP_CAP_AF);
+}
+
+static void gpio_tp_capture_stop(void) {
+    LL_TIM_DisableCounter(GPIO_TP_CAP_TIM);
+    LL_TIM_DisableIT_CC1(GPIO_TP_CAP_TIM);
+    LL_TIM_CC_DisableChannel(GPIO_TP_CAP_TIM, LL_TIM_CHANNEL_CH1);
+    furi_hal_interrupt_set_isr(GPIO_TP_CAP_IRQ, NULL, NULL);
+    furi_hal_bus_disable(GPIO_TP_CAP_BUS);
 }
 
 // Delivers decoded packets to the engine (which does the storage I/O), off the
@@ -201,10 +252,7 @@ void gpio_transport_init(GpioTransportMode mode) {
         furi_thread_set_priority(tp->rx_worker, FuriThreadPriorityHigh);
         furi_thread_start(tp->rx_worker);
 
-        // Input with pull-up (line idles high), interrupt on the falling edge.
-        tp->rx_have_last = false;
-        furi_hal_gpio_init(GPIO_TP_GPIO, GpioModeInterruptFall, GpioPullUp, GpioSpeedLow);
-        furi_hal_gpio_add_int_callback(GPIO_TP_GPIO, gpio_tp_exti_isr, tp);
+        gpio_tp_capture_start(tp); // TIM17 CH1 hardware input-capture on PA7
         tp->field_on = true;
     }
 
@@ -227,7 +275,7 @@ void gpio_transport_deinit(void) {
         if(tp->tx_q) furi_message_queue_free(tp->tx_q);
     } else {
         if(tp->field_on) {
-            furi_hal_gpio_remove_int_callback(GPIO_TP_GPIO);
+            gpio_tp_capture_stop(); // no more capture interrupts feed the stream
             tp->field_on = false;
         }
         if(tp->rx_worker) {
@@ -253,7 +301,7 @@ void gpio_transport_stop_field(void) {
     GpioTransport* tp = gpio_tp;
     if(!tp || tp->mode != GpioTransportModeReceiver) return;
     if(tp->field_on) {
-        furi_hal_gpio_remove_int_callback(GPIO_TP_GPIO);
+        gpio_tp_capture_stop();
         tp->field_on = false;
     }
 }

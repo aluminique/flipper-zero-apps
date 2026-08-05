@@ -81,7 +81,7 @@ void share_scene_send_on_enter(void* context) {
 
     // Setup dialog to show progress
     dialog_ex_set_header(app->dialog_show_file, "Sending via " FSH_TRANSPORT_NAME "...", 64, SCENE_HEADER_POSITION_Y, AlignCenter, AlignTop);
-    dialog_ex_set_text(app->dialog_show_file, "Wire pin4-pin4, GND", 64, 32, AlignCenter, AlignCenter);
+    dialog_ex_set_text(app->dialog_show_file, "Wire pin2-pin2, GND", 64, 32, AlignCenter, AlignCenter);
     dialog_ex_set_left_button_text(app->dialog_show_file, "Cancel");
     dialog_ex_set_right_button_text(app->dialog_show_file, NULL); // Skip right button
 
@@ -154,7 +154,7 @@ static void update_timer_callback(void* context) {
         fsh_unlock();
 
         // fsh_init has not published state yet (hashing not started or init
-        // failed) — keep the "Wire pin4-pin4, GND" hint from on_enter.
+        // failed) — keep the "Wire pin2-pin2, GND" hint from on_enter.
         if(fsize == 0) return;
 
         uint32_t eta_sec = fsize / FSH_PAYLOAD_THROUGHPUT_BPS;

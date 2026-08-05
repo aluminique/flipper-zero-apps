@@ -7,7 +7,7 @@
 
 **Flipper Share GPIO** transfers any file directly from one Flipper Zero to another over a
 plain **GPIO jumper wire** — no extra hardware, no external components, phone, computer,
-internet or radio needed. Jumper pin 4 ↔ pin 4 and GND ↔ GND.
+internet or radio needed. Jumper pin 2 ↔ pin 2 and GND ↔ GND.
 
 It is a one-way (carousel) link built on a small custom **pulse-distance modem**: the line
 idles high, the sender marks each bit boundary with a short LOW tick (a fast falling edge) and

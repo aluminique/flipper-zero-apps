@@ -89,7 +89,7 @@ static void submenu_callback(void* context, uint32_t index) {
         furi_string_cat_printf(about_text, "\e#%s\n", "Description");
         furi_string_cat_printf(
             about_text, "%s\n\n",
-            "File transfer over a 1-Wire link. Jumper GPIO pin 4 <-> pin 4 and GND.");
+            "File transfer over a single GPIO wire. Jumper pin 2 <-> pin 2 and GND.");
         furi_string_cat_printf(about_text, "Also: Sub-GHz, IR, NFC & more - see Github.\n");
         widget_add_text_scroll_element(
             app->widget_about, 0, 16, 128, 50, furi_string_get_cstr(about_text));
